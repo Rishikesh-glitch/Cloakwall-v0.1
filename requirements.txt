@@ -1,0 +1,3 @@
+# Cloakwall core has no dependencies beyond the standard library.
+# litellm is only needed to run as a proxy guardrail.
+litellm>=1.60.0

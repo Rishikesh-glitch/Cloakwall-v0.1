@@ -1,0 +1,33 @@
+# LiteLLM proxy config with Cloakwall.
+#
+#   litellm --config examples/config.yaml
+#
+# Cloakwall runs in-process. No sidecar container, no Presidio deployment,
+# no external endpoint -- so this config works unchanged in an air-gapped
+# cluster.
+
+model_list:
+  - model_name: gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+
+  # Point at a local model and nothing leaves your network at all.
+  - model_name: local-llama
+    litellm_params:
+      model: openai/llama-3.1-8b
+      api_base: http://vllm.internal:8000/v1
+      api_key: "not-needed"
+
+guardrails:
+  - guardrail_name: cloakwall
+    litellm_params:
+      guardrail: cloakwall.guardrail.Cloakwall
+      mode: pre_call              # must be pre_call: during_call runs in
+                                  # parallel with the LLM call, so edits may
+                                  # not land before the request leaves
+      default_on: true
+      redaction_mode: mask        # mask | hash | partial
+      audit_path: /var/log/cloakwall/audit.log
+      fail_closed: true           # reject rather than forward unscrubbed text
+      # entities: [EMAIL, CARD, SSN, MRN, NHS]   # omit for all
