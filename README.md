@@ -65,13 +65,29 @@ one is generated per boot, so tokens are stable within a run only.
 
 ## Audit trail
 
-Every entry commits to the SHA-256 of the entry before it. Editing or
-deleting any line breaks the chain and verification names the line:
+Every entry commits to the SHA-256 of the entry before it and carries a
+monotonic sequence number. The chain head is mirrored to a separate anchor
+file after every append, and pushed to your SIEM every `anchor_every`
+entries.
+
+That combination catches all four tamper modes:
 
 ```
-chain intact
-line 3: entry altered after writing
+chain intact, 10 entries, anchor matches
+line 2: entry altered after writing
+line 3: chain break
+truncated: anchor records 10 entries, log holds 6
 ```
+
+The last one is why the anchor exists. A bare hash chain does not survive
+truncation — a prefix of a valid chain is itself a valid chain, so dropping
+the final entries verifies clean. The anchor still knows how many there
+should be.
+
+An anchor on the same filesystem stops accidental truncation and a careless
+attacker. An anchor in your SIEM, under different access control, stops
+someone who can write to the pod. Pass a SIEM-retrieved anchor to
+`verify(anchor=...)` to check against a copy the log cannot reach.
 
 The log records which entity types were found and how many. **It never
 records the values that were redacted** — an audit log that quotes the PII it
