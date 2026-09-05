@@ -99,6 +99,28 @@ with tempfile.TemporaryDirectory() as d:
     open(log.path, "w").write("\n".join(lines) + "\n")
     check("deleted entry detected", log.verify()[0], False)
 
+section("Truncation resistance")
+with tempfile.TemporaryDirectory() as d:
+    log = AuditLog(os.path.join(d, "t.log"))
+    for i in range(10):
+        log.append("test.event", n=i)
+    anchor = log.read_anchor()
+    check("anchor records entry count", anchor["seq"], 10)
+    check("intact log matches anchor", log.verify()[0], True)
+
+    lines = open(log.path).read().splitlines()[:6]
+    open(log.path, "w").write("\n".join(lines) + "\n")
+    ok, msg = log.verify(anchor=anchor)
+    check("end-truncation detected", ok, False)
+    check("reports the shortfall", "anchor records 10" in msg, True)
+
+with tempfile.TemporaryDirectory() as d:
+    log = AuditLog(os.path.join(d, "s.log"))
+    for i in range(5):
+        log.append("e", n=i)
+    seqs = [json.loads(l)["seq"] for l in open(log.path) if l.strip()]
+    check("sequence numbers are contiguous", seqs, [1, 2, 3, 4, 5])
+
 # ---------------------------------------------------------------- guardrail
 section("Guardrail hook")
 

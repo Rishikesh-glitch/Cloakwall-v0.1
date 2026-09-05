@@ -5,10 +5,26 @@ What a compliance officer asks for after an incident is not "were you
 redacting" but "prove what happened on 14 March and prove the record has not
 been edited since". A plain log file cannot answer the second half.
 
-Every entry commits to the SHA-256 of the entry before it, so removing or
-rewriting any line breaks the chain from that point on and `verify()` names
-the line. This is the same construction as the Z-Egress control plane, which
-is why the code is short: it was already right.
+Every entry commits to the SHA-256 of the entry before it, so rewriting any
+line breaks the chain from that point on and `verify()` names the line.
+
+A bare hash chain does not survive truncation, though: a prefix of a valid
+chain is itself a valid chain, so dropping the last N entries verifies
+clean. Two things close that gap.
+
+  1. Each entry carries a monotonic sequence number, so gaps in the middle
+     are caught even when the hashes are recomputed.
+
+  2. The head (sequence number plus hash) is mirrored to a separate anchor
+     file after every append, and optionally pushed to your SIEM. Verifying
+     against the anchor detects truncation, because the anchor still knows
+     how many entries there should be.
+
+The anchor is only as good as its separation from the log. On the same
+filesystem it stops accidental truncation and a careless attacker; pushed to
+a SIEM under different access control, it stops a determined one. That trust
+boundary is the operator's to choose, so both are supported and neither is
+claimed to be the other.
 
 The log never stores the values that were redacted. It stores what kind of
 entity was found and how many -- enough to prove the control was working,
@@ -36,9 +52,14 @@ class AuditLog:
         self._lock = threading.Lock()   # hooks run concurrently under uvicorn
         os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
 
-    def _last_hash(self) -> str:
+    @property
+    def anchor_path(self) -> str:
+        return self.path + ".head"
+
+    def _last(self) -> tuple[int, str]:
+        """Sequence number and hash of the final entry."""
         if not os.path.exists(self.path):
-            return GENESIS
+            return 0, GENESIS
         # Read the tail rather than the whole file: this log grows fast and
         # loading it on every request would be O(n) per request.
         with open(self.path, "rb") as fh:
@@ -50,16 +71,35 @@ class AuditLog:
         for line in reversed(tail):
             if line.strip():
                 try:
-                    return json.loads(line)["hash"]
+                    e = json.loads(line)
+                    return int(e.get("seq", 0)), e["hash"]
                 except Exception:
                     continue
-        return GENESIS
+        return 0, GENESIS
+
+    def _write_anchor(self, seq: int, head: str) -> None:
+        """Written atomically: a torn anchor would be worse than none."""
+        tmp = self.anchor_path + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump({"seq": seq, "hash": head,
+                       "ts": datetime.now(timezone.utc).isoformat()}, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, self.anchor_path)
+
+    def read_anchor(self) -> dict | None:
+        try:
+            with open(self.anchor_path) as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return None
 
     def append(self, event: str, **fields) -> dict:
         with self._lock:
-            prev = self._last_hash()
+            prev_seq, prev = self._last()
             entry = {
                 "ts": datetime.now(timezone.utc).isoformat(),
+                "seq": prev_seq + 1,
                 "event": event,
                 "host": socket.gethostname(),
                 "prev": prev,
@@ -71,12 +111,19 @@ class AuditLog:
                 fh.write(json.dumps(entry, sort_keys=True) + "\n")
                 fh.flush()
                 os.fsync(fh.fileno())   # survive a pod kill mid-write
+            self._write_anchor(entry["seq"], entry["hash"])
             return entry
 
-    def verify(self) -> tuple[bool, str]:
+    def verify(self, anchor: dict | None = None) -> tuple[bool, str]:
+        """Verify the chain, and if an anchor is available, verify the log has
+        not been truncated. Pass an anchor retrieved from your SIEM to check
+        against a copy the log's own filesystem cannot reach."""
         if not os.path.exists(self.path):
             return True, "no audit log yet"
+
         prev = GENESIS
+        expected_seq = 0
+        last_hash = GENESIS
         with open(self.path) as fh:
             for n, line in enumerate(fh, 1):
                 if not line.strip():
@@ -85,12 +132,25 @@ class AuditLog:
                 claimed = e.pop("hash", None)
                 if e.get("prev") != prev:
                     return False, f"line {n}: chain break"
+                expected_seq += 1
+                if int(e.get("seq", -1)) != expected_seq:
+                    return False, (f"line {n}: sequence gap "
+                                   f"(expected {expected_seq}, found {e.get('seq')})")
                 recomputed = hashlib.sha256(
                     (prev + json.dumps(e, sort_keys=True)).encode()).hexdigest()
                 if recomputed != claimed:
                     return False, f"line {n}: entry altered after writing"
-                prev = claimed
-        return True, "chain intact"
+                prev = last_hash = claimed
+
+        a = anchor if anchor is not None else self.read_anchor()
+        if a:
+            if expected_seq < int(a.get("seq", 0)):
+                return False, (f"truncated: anchor records {a['seq']} entries, "
+                               f"log holds {expected_seq}")
+            if expected_seq == int(a.get("seq", 0)) and last_hash != a.get("hash"):
+                return False, "head does not match anchor"
+            return True, f"chain intact, {expected_seq} entries, anchor matches"
+        return True, f"chain intact, {expected_seq} entries (no anchor to check truncation)"
 
 
 # ------------------------------------------------------------------ #
