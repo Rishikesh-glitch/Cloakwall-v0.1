@@ -72,27 +72,30 @@ class Detector:
     pattern: re.Pattern
     validate: Callable[[str], bool] | None = None
     keep_tail: int = 0              # digits/chars preserved in partial mode
+    gate: tuple[str, ...] = ()      # skip this detector unless one of these
+                                    # literals appears; a plain substring test
+                                    # is far cheaper than a regex scan
 
 
 # Order matters. Specific formats first so they claim their text before a
 # looser pattern can chew into it.
 DETECTORS: list[Detector] = [
     Detector("CARD", re.compile(r"\b(?:\d[ -]*?){13,19}\b"), _luhn, keep_tail=4),
-    Detector("SSN", re.compile(r"\b(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b")),
+    Detector("SSN", re.compile(r"\b(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b"), gate=("-",)),
     Detector("IBAN", re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b")),
-    Detector("EMAIL", re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]{2,}\b")),
-    Detector("AWS_KEY", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
+    Detector("EMAIL", re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]{2,}\b"), gate=("@",)),
+    Detector("AWS_KEY", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), gate=("AKIA", "ASIA")),
     Detector("API_KEY", re.compile(r"\b(?:sk|pk|rk)[-_](?:live|test|proj)?[-_]?[A-Za-z0-9]{16,}\b")),
-    Detector("BEARER", re.compile(r"\bey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")),
-    Detector("MRN", re.compile(r"\b(?:MRN|mrn)[:\s#]*([A-Z0-9]{6,12})\b")),
+    Detector("BEARER", re.compile(r"\bey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"), gate=("ey",)),
+    Detector("MRN", re.compile(r"\b(?:MRN|mrn)[:\s#]*([A-Z0-9]{6,12})\b"), gate=("MRN", "mrn")),
     Detector("NHS", re.compile(r"\b\d{3}[ -]?\d{3}[ -]?\d{4}\b"), _nhs),
     # Handles +94 77 123 4567 and +1 (555) 867-5309 as well as bare US-style
     # numbers. Group sizes vary by country, so 2-4 digits per group.
     Detector("PHONE", re.compile(
         r"(?<![\d.])(?:\+\d{1,3}[ -]?)?(?:\(\d{2,4}\)|\d{2,4})[ -]\d{2,4}[ -]?\d{2,4}(?![\d.])"
         r"|(?<![\d.])\d{3}-\d{3}-\d{4}(?![\d.])"), keep_tail=4),
-    Detector("IPV4", re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b")),
-    Detector("DOB", re.compile(r"\b(?:19|20)\d{2}[-/](?:0[1-9]|1[0-2])[-/](?:0[1-9]|[12]\d|3[01])\b")),
+    Detector("IPV4", re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b"), gate=(".",)),
+    Detector("DOB", re.compile(r"\b(?:19|20)\d{2}[-/](?:0[1-9]|1[0-2])[-/](?:0[1-9]|[12]\d|3[01])\b"), gate=("19", "20")),
 ]
 
 DEFAULT_ENTITIES = {d.name for d in DETECTORS}
@@ -138,6 +141,11 @@ class Redactor:
         self.detectors = [d for d in (list(DETECTORS) + (extra or []))
                           if d.name in self.entities]
 
+        # Cheap global gate. Every detector needs a digit or an "@", so prose
+        # with neither skips the regex engine entirely. Most system prompts
+        # and most model output land here.
+        self._gate = re.compile(r"[\d@]")
+
     def _token(self, entity: str, value: str, keep_tail: int) -> str:
         if self.mode == "mask":
             return f"<{entity}>"
@@ -153,19 +161,30 @@ class Redactor:
         if not text:
             return Result(text="", redactions=[])
 
-        # Collect spans from every detector first, then resolve overlaps in
-        # one pass. Replacing as we go would shift offsets under later
-        # detectors and corrupt the audit record.
+        if not self._gate.search(text):
+            return Result(text=text, redactions=[])
+
+        # Per-detector literal gate. A substring test runs at C speed and is
+        # orders of magnitude cheaper than a regex scan, so a detector whose
+        # required literal is absent never runs. On typical traffic this
+        # skips most of them.
         spans: list[tuple[int, int, Detector, str]] = []
         for det in self.detectors:
+            if det.gate and not any(g in text for g in det.gate):
+                continue
             for m in det.pattern.finditer(text):
                 value = m.group(0)
                 if det.validate and not det.validate(value):
-                    continue
+                    continue      # e.g. a 16-digit order number failing Luhn
                 spans.append((m.start(), m.end(), det, value))
 
+        if not spans:
+            return Result(text=text, redactions=[])
+
         # Earliest start wins; on a tie the longer match wins. This is what
-        # keeps a 16-digit card from being claimed by the phone pattern.
+        # keeps a card from being claimed by the phone pattern, and it is why
+        # a detector failing its validator falls through to the next one --
+        # the reason a single combined alternation could not be used here.
         spans.sort(key=lambda s: (s[0], -(s[1] - s[0])))
 
         out: list[str] = []
@@ -184,9 +203,29 @@ class Redactor:
         return Result(text="".join(out), redactions=redactions)
 
     def redact_messages(self, messages: list[dict]) -> tuple[list[dict], list[Redaction]]:
-        """Redact an OpenAI-style messages array in place-safe fashion."""
+        """Redact an OpenAI-style messages array.
+
+        Covers tool_call arguments as well as content. Those are a JSON string
+        an agent assembled, frequently from the very record you are trying to
+        protect -- a lookup_patient call carries the MRN in its arguments and
+        never touches the content field at all. Redacting content alone leaks
+        exactly the payloads agentic workloads generate most."""
         cleaned, all_r = [], []
         for msg in messages:
+            tool_calls = msg.get("tool_calls")
+            if isinstance(tool_calls, list):
+                new_calls = []
+                for tc in tool_calls:
+                    fn = (tc or {}).get("function") or {}
+                    args = fn.get("arguments")
+                    if isinstance(args, str) and args:
+                        r = self.redact(args)
+                        if r.redactions:
+                            all_r.extend(r.redactions)
+                            tc = {**tc, "function": {**fn, "arguments": r.text}}
+                    new_calls.append(tc)
+                msg = {**msg, "tool_calls": new_calls}
+
             content = msg.get("content")
             if isinstance(content, str):
                 r = self.redact(content)

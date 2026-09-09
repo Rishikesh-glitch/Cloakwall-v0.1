@@ -167,6 +167,31 @@ async def guardrail_tests():
 
         check("stats report intact chain", g.stats()["audit_intact"], True)
 
+        tc = {"model": "m", "messages": [{"role": "assistant", "tool_calls": [
+            {"id": "c1", "type": "function", "function": {
+                "name": "lookup",
+                "arguments": '{"card":"4111111111111111","mail":"a@b.com"}'}}]}]}
+        out = await g.async_pre_call_hook(Key(), None, tc, "acompletion")
+        args = out["messages"][0]["tool_calls"][0]["function"]["arguments"]
+        check("tool-call arguments redacted", args,
+              '{"card":"<CARD>","mail":"<EMAIL>"}')
+
+    with tempfile.TemporaryDirectory() as d:
+        b = Cloakwall(audit_path=os.path.join(d, "b.log"), block_on=["CARD"])
+        blocked = False
+        try:
+            await b.async_pre_call_hook(Key(), None, {"model": "m", "messages": [
+                {"role": "user", "content": "card 4111111111111111"}]}, "acompletion")
+        except ValueError:
+            blocked = True
+        check("block_on rejects the request", blocked, True)
+
+        ok = await b.async_pre_call_hook(Key(), None, {"model": "m", "messages": [
+            {"role": "user", "content": "mail a@b.com"}]}, "acompletion")
+        check("non-blocked entity still redacted",
+              ok["messages"][0]["content"], "mail <EMAIL>")
+        check("block counted in stats", b.stats()["requests_blocked"], 1)
+
 
 asyncio.run(guardrail_tests())
 
