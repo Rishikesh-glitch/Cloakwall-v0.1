@@ -51,6 +51,7 @@ class Cloakwall(CustomGuardrail):
                  audit_path: str = "./cloakwall-audit.log",
                  fail_closed: bool = True,
                  anchor_every: int = 100,
+                 block_on: Optional[list] = None,
                  **kwargs):
         self.redactor = Redactor(
             mode=redaction_mode,
@@ -63,6 +64,12 @@ class Cloakwall(CustomGuardrail):
         # than forward text that may not have been scrubbed.
         self.fail_closed = fail_closed
         self.anchor_every = max(1, int(anchor_every))
+        # Entities that must never reach the model at all. Redaction is the
+        # default because it keeps the request useful, but some policies want
+        # the call rejected outright -- a card number in a tool-call argument
+        # is a bug upstream, and silently masking it hides the bug.
+        self.block_on = set(block_on or [])
+        self.blocked = 0
         self.requests = 0
         self.redacted = 0
         super().__init__(**kwargs)
@@ -100,6 +107,19 @@ class Cloakwall(CustomGuardrail):
                 raise
             return data
 
+        hits = {r.entity for r in redactions}
+        blocked = hits & self.block_on
+        if blocked:
+            self.blocked += 1
+            counts = {e: sum(1 for r in redactions if r.entity == e) for e in hits}
+            self._record("cloakwall.blocked",
+                         model=data.get("model"),
+                         key_alias=getattr(user_api_key_dict, "key_alias", None),
+                         entities=counts, blocked_on=sorted(blocked))
+            raise ValueError(
+                "Cloakwall blocked this request: "
+                f"{', '.join(sorted(blocked))} present in prompt or tool-call arguments")
+
         if redactions:
             self.redacted += 1
             data["messages"] = cleaned
@@ -135,6 +155,8 @@ class Cloakwall(CustomGuardrail):
         return {
             "requests": self.requests,
             "requests_with_redactions": self.redacted,
+            "requests_blocked": self.blocked,
+            "block_on": sorted(self.block_on),
             "redaction_mode": self.redactor.mode,
             "entities_enabled": sorted(self.redactor.entities),
             "audit_chain": msg,
