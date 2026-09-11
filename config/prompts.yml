@@ -1,0 +1,8 @@
+prompts:
+  - task: generate_bot_message
+    content: |
+      Instructions: Output the following message exactly as it is written. Do not paraphrase, do not rewrite, and do not include any extra text or variables like $bot_message.
+
+      Message: "{{ bot_message }}"
+
+      Output:
