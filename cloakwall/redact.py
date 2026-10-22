@@ -210,37 +210,149 @@ class Redactor:
         protect -- a lookup_patient call carries the MRN in its arguments and
         never touches the content field at all. Redacting content alone leaks
         exactly the payloads agentic workloads generate most."""
-        cleaned, all_r = [], []
-        for msg in messages:
-            tool_calls = msg.get("tool_calls")
-            if isinstance(tool_calls, list):
-                new_calls = []
-                for tc in tool_calls:
-                    fn = (tc or {}).get("function") or {}
-                    args = fn.get("arguments")
-                    if isinstance(args, str) and args:
-                        r = self.redact(args)
-                        if r.redactions:
-                            all_r.extend(r.redactions)
-                            tc = {**tc, "function": {**fn, "arguments": r.text}}
-                    new_calls.append(tc)
-                msg = {**msg, "tool_calls": new_calls}
-
-            content = msg.get("content")
-            if isinstance(content, str):
-                r = self.redact(content)
-                msg = {**msg, "content": r.text}
-                all_r.extend(r.redactions)
-            elif isinstance(content, list):
-                # multimodal: text parts only, image parts pass through
-                parts = []
-                for part in content:
-                    if isinstance(part, dict) and part.get("type") == "text":
-                        r = self.redact(part.get("text", ""))
-                        parts.append({**part, "text": r.text})
-                        all_r.extend(r.redactions)
-                    else:
-                        parts.append(part)
-                msg = {**msg, "content": parts}
-            cleaned.append(msg)
+        cleaned, all_r = self.redact_value(messages)
         return cleaned, all_r
+
+    def redact_value(self, value):
+        """Redact every text-bearing field of a request or response payload.
+
+        One walker for every shape a LiteLLM proxy forwards, because each
+        shape a redactor forgets is a field that leaks:
+
+            OpenAI chat       messages[].content, tool_calls[].function.arguments
+            Anthropic         top-level system, content blocks, tool_use.input,
+                              tool_result.content
+            Responses API     input (string or items), function_call.arguments,
+                              function_call_output.output
+            completions /     prompt, input (strings or lists of strings;
+            images/embeddings token-id lists pass through)
+
+        Only the keys in _TEXT_KEYS are descended into, so ids, roles, model
+        names and image URLs are never rewritten. Returns new objects; the
+        input is not mutated."""
+        if isinstance(value, str):
+            r = self.redact(value)
+            return r.text, r.redactions
+        if isinstance(value, list):
+            out, reds = [], []
+            for item in value:
+                v, r = self.redact_value(item)
+                out.append(v)
+                reds.extend(r)
+            return out, reds
+        if isinstance(value, dict):
+            if value.get("type") in _BINARY_PARTS:
+                return value, []
+            out, reds = dict(value), []
+            for key, v in value.items():
+                if key == "input" and value.get("type") == "tool_use":
+                    # Anthropic tool_use input is a structured dict, not a
+                    # JSON string: any string inside it may carry the record.
+                    v, r = self._redact_leaves(v)
+                elif key in _TEXT_KEYS:
+                    v, r = self.redact_value(v)
+                else:
+                    continue
+                out[key] = v
+                reds.extend(r)
+            return out, reds
+        return value, []
+
+    def _redact_leaves(self, value):
+        """Redact every string anywhere inside value, whatever its key."""
+        if isinstance(value, str):
+            r = self.redact(value)
+            return r.text, r.redactions
+        if isinstance(value, list):
+            out, reds = [], []
+            for item in value:
+                v, r = self._redact_leaves(item)
+                out.append(v)
+                reds.extend(r)
+            return out, reds
+        if isinstance(value, dict):
+            out, reds = {}, []
+            for k, item in value.items():
+                v, r = self._redact_leaves(item)
+                out[k] = v
+                reds.extend(r)
+            return out, reds
+        return value, []
+
+
+# Keys whose values can carry user or model text. Everything else (role, id,
+# name, model, type, image_url...) is structure and is left alone.
+_TEXT_KEYS = frozenset({
+    "content", "text", "arguments", "output", "input", "prompt", "system",
+    "tool_calls", "function", "function_call",
+})
+
+# Content parts that carry binary data or URLs, never prose.
+_BINARY_PARTS = frozenset({
+    "image_url", "image", "input_image", "input_audio", "file", "input_file",
+    "document",
+})
+
+
+class StreamRedactor:
+    """Redacts text that arrives in fragments, as a streamed response does.
+
+    Redacting each chunk on its own leaks: "4111 1111" in one chunk and
+    "1111 1111" in the next are both harmless, together they are a card. So
+    the last `holdback` characters are held back until more text arrives,
+    and text is only released at a whitespace boundary that no detected
+    entity spans. Every detector matches less than `holdback` characters, so
+    anything that starts in the released part is complete by the time it is
+    released. flush() releases the rest when the stream ends.
+
+    The cost is latency, not tokens: the client sees text `holdback`
+    characters later than it would otherwise, and sees all of it."""
+
+    def __init__(self, redactor: Redactor, holdback: int = 64,
+                 max_pending: int = 4096):
+        self.redactor = redactor
+        self.holdback = holdback
+        # A long run with no safe boundary (base64, minified JSON) must not
+        # be held forever; past this size it is cut at the holdback line.
+        self.max_pending = max(max_pending, holdback * 2)
+        self._pending = ""
+
+    def feed(self, fragment: str) -> Result:
+        self._pending += fragment
+        limit = len(self._pending) - self.holdback
+        if limit <= 0:
+            return Result(text="", redactions=[])
+        cut = self._safe_cut(limit)
+        if cut <= 0:
+            return Result(text="", redactions=[])
+        ready, self._pending = self._pending[:cut], self._pending[cut:]
+        return self.redactor.redact(ready)
+
+    def flush(self) -> Result:
+        ready, self._pending = self._pending, ""
+        return self.redactor.redact(ready)
+
+    @property
+    def pending(self) -> bool:
+        return bool(self._pending)
+
+    def _safe_cut(self, limit: int) -> int:
+        p = self._pending
+        spans = [(r.start, r.end) for r in self.redactor.redact(p).redactions]
+
+        def inside(c: int) -> bool:
+            return any(s < c < e for s, e in spans)
+
+        for c in range(limit, 0, -1):
+            # Cut just after whitespace, and never between two digit groups:
+            # "+94 77 123 4567" and "4111 1111 1111 1111" contain spaces.
+            if not p[c - 1].isspace():
+                continue
+            before = p[c - 2] if c >= 2 else ""
+            if (before.isdigit() or before in "+(") and (p[c].isdigit() or p[c] in "+("):
+                continue
+            if not inside(c):
+                return c
+        if len(p) > self.max_pending and not inside(limit):
+            return limit
+        return 0

@@ -195,5 +195,194 @@ async def guardrail_tests():
 
 asyncio.run(guardrail_tests())
 
+# ---------------------------------------------------------------- coverage
+section("Request fields beyond messages")
+
+
+async def coverage_tests():
+    with tempfile.TemporaryDirectory() as d:
+        g = Cloakwall(audit_path=os.path.join(d, "c.log"))
+
+        out = await g.async_pre_call_hook(Key(), None, {
+            "model": "claude", "system": "Patient MRN: A1234567",
+            "messages": [{"role": "user", "content": "hi"}]}, "anthropic_messages")
+        check("anthropic system string", out["system"], "Patient <MRN>")
+
+        out = await g.async_pre_call_hook(Key(), None, {
+            "model": "claude", "system": [{"type": "text", "text": "mail a@b.com"}],
+            "messages": []}, "anthropic_messages")
+        check("anthropic system blocks", out["system"][0]["text"], "mail <EMAIL>")
+
+        out = await g.async_pre_call_hook(Key(), None, {"model": "claude", "messages": [
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": "lookup",
+                 "input": {"patient": {"email": "p@q.org"}, "n": 3}}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1",
+                 "content": "card 4111111111111111"}]}]}, "anthropic_messages")
+        blocks = out["messages"]
+        check("tool_use input redacted",
+              blocks[0]["content"][0]["input"], {"patient": {"email": "<EMAIL>"}, "n": 3})
+        check("tool_use name untouched", blocks[0]["content"][0]["name"], "lookup")
+        check("tool_result redacted", blocks[1]["content"][0]["content"], "card <CARD>")
+
+        out = await g.async_pre_call_hook(Key(), None, {
+            "model": "dall-e", "prompt": "a badge reading ssn 123-45-6789"},
+            "aimage_generation")
+        check("image-generation prompt", out["prompt"], "a badge reading ssn <SSN>")
+
+        out = await g.async_pre_call_hook(Key(), None, {
+            "model": "emb", "input": ["mail z@y.com", "clean"]}, "aembedding")
+        check("embeddings input list", out["input"], ["mail <EMAIL>", "clean"])
+
+        out = await g.async_pre_call_hook(Key(), None, {
+            "model": "emb", "input": [101, 2023, 102]}, "aembedding")
+        check("token ids untouched", out["input"], [101, 2023, 102])
+
+        out = await g.async_pre_call_hook(Key(), None, {"model": "gpt", "input": [
+            {"role": "user", "content": [{"type": "input_text", "text": "a@b.com"},
+                                         {"type": "input_image", "image_url": "http://x/1@2.png"}]},
+            {"type": "function_call", "call_id": "c", "name": "f",
+             "arguments": '{"ssn":"123-45-6789"}'},
+            {"type": "function_call_output", "call_id": "c", "output": "a@b.com"}]},
+            "aresponses")
+        items = out["input"]
+        check("responses input_text", items[0]["content"][0]["text"], "<EMAIL>")
+        check("responses input_image untouched",
+              items[0]["content"][1]["image_url"], "http://x/1@2.png")
+        check("responses function_call args", items[1]["arguments"], '{"ssn":"<SSN>"}')
+        check("responses function_call_output", items[2]["output"], "<EMAIL>")
+
+        raw = open(os.path.join(d, "c.log")).read()
+        check("no request value in audit log",
+              any(v in raw for v in ("A1234567", "p@q.org", "123-45-6789", "z@y.com")), False)
+
+        b = Cloakwall(audit_path=os.path.join(d, "b.log"), block_on=["SSN"])
+        blocked = False
+        try:
+            await b.async_pre_call_hook(Key(), None,
+                                        {"model": "m", "prompt": "ssn 123-45-6789"}, "x")
+        except ValueError:
+            blocked = True
+        check("block_on applies to prompt field", blocked, True)
+
+
+asyncio.run(coverage_tests())
+
+# ---------------------------------------------------------------- streaming
+section("Stream redaction")
+
+from cloakwall.redact import StreamRedactor
+
+
+def stream_through(text, pieces, mode="mask"):
+    sr = StreamRedactor(Redactor(mode=mode, secret=b"s"), holdback=64)
+    out, size = [], max(1, len(text) // pieces)
+    for i in range(0, len(text), size):
+        out.append(sr.feed(text[i:i + size]).text)
+    out.append(sr.flush().text)
+    return "".join(out)
+
+
+msg = ("Your card 4111 1111 1111 1111 is on file, call +94 77 123 4567 "
+       "or mail alice@corp.com. " * 4)
+whole = Redactor(mode="mask", secret=b"s").redact(msg).text
+for n in (len(msg), 40, 7):
+    check(f"split into {n} pieces matches whole-text redaction",
+          stream_through(msg, n), whole)
+check("hash tokens stable across chunks", stream_through(msg, len(msg), "hash"),
+      Redactor(mode="hash", secret=b"s").redact(msg).text)
+check("clean text passes through intact", stream_through("plain words " * 30, 50),
+      "plain words " * 30)
+sr = StreamRedactor(Redactor(), holdback=64)
+check("short text held until flush", sr.feed("hi a@b.com").text, "")
+check("flush releases it redacted", sr.flush().text, "hi <EMAIL>")
+
+# ---------------------------------------------------------------- output
+section("Response redaction")
+
+from types import SimpleNamespace as NS
+
+
+def chunk(content=None, finish=None, tool_args=None, tool_id=None, name=None):
+    tcs = None
+    if tool_args is not None:
+        tcs = [NS(index=0, id=tool_id, type="function",
+                  function=NS(name=name, arguments=tool_args))]
+    return NS(choices=[NS(index=0, delta=NS(content=content, tool_calls=tcs),
+                          finish_reason=finish)])
+
+
+async def agen(items):
+    for i in items:
+        yield i
+
+
+async def output_tests():
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "o.log")
+        off = Cloakwall(audit_path=path)
+        resp = {"choices": [{"index": 0, "message": {"content": "mail a@b.com"},
+                             "finish_reason": "stop"}]}
+        await off.async_post_call_success_hook({"model": "m"}, Key(), resp)
+        check("redact_output off leaves response", resp["choices"][0]["message"]["content"],
+              "mail a@b.com")
+
+        g = Cloakwall(audit_path=path, redact_output=True)
+        resp = NS(choices=[NS(index=0, finish_reason="tool_calls", message=NS(
+            content="card 4111111111111111",
+            tool_calls=[NS(function=NS(name="f", arguments='{"m":"a@b.com"}'))]))])
+        await g.async_post_call_success_hook({"model": "m"}, Key(), resp)
+        check("response content redacted", resp.choices[0].message.content, "card <CARD>")
+        check("response tool args redacted",
+              resp.choices[0].message.tool_calls[0].function.arguments, '{"m":"<EMAIL>"}')
+
+        resp = {"content": [{"type": "text", "text": "ssn 123-45-6789"},
+                            {"type": "tool_use", "name": "f", "input": {"e": "x@y.io"}}]}
+        await g.async_post_call_success_hook({"model": "claude"}, Key(), resp)
+        check("anthropic response text", resp["content"][0]["text"], "ssn <SSN>")
+        check("anthropic response tool_use", resp["content"][1]["input"], {"e": "<EMAIL>"})
+
+        resp = {"choices": [{"index": 0, "text": "mail a@b.com"}]}
+        await g.async_post_call_success_hook({"model": "m", "stream": True}, Key(), resp)
+        check("assembled stream copy not re-redacted", resp["choices"][0]["text"],
+              "mail a@b.com")
+
+        text = "Sure. The card on file is 4111 1111 1111 1111 and the email is bob@clinic.org."
+        parts = [text[i:i + 5] for i in range(0, len(text), 5)]
+        chunks = [chunk(p) for p in parts] + [chunk(None, finish="stop")]
+        got = [c async for c in g.async_post_call_streaming_iterator_hook(
+            Key(), agen(chunks), {"model": "m"})]
+        streamed = "".join(c.choices[0].delta.content or "" for c in got)
+        check("stream redacts PII split across chunks", streamed,
+              "Sure. The card on file is <CARD> and the email is <EMAIL>.")
+        check("finish chunk still last", got[-1].choices[0].finish_reason, "stop")
+        check("no raw card reaches the client", "1111" in streamed, False)
+
+        args = '{"patient_email":"bob@clinic.org","mrn":"MRN A1234567"}'
+        chunks = [chunk(None, tool_args="", tool_id="call_1", name="lookup")]
+        chunks += [chunk(None, tool_args=args[i:i + 4]) for i in range(0, len(args), 4)]
+        chunks += [chunk(None, finish="tool_calls")]
+        got = [c async for c in g.async_post_call_streaming_iterator_hook(
+            Key(), agen(chunks), {"model": "m"})]
+        streamed_args = "".join(
+            tc.function.arguments or ""
+            for c in got for tc in (c.choices[0].delta.tool_calls or []))
+        check("streamed tool args redacted", streamed_args,
+              '{"patient_email":"<EMAIL>","mrn":"<MRN>"}')
+        names = [tc.function.name for c in got for tc in (c.choices[0].delta.tool_calls or [])
+                 if tc.function.name]
+        check("function name sent once", names, ["lookup"])
+
+        raw = open(path).read()
+        check("output values absent from audit log",
+              any(v in raw for v in ("bob@clinic.org", "4111", "A1234567")), False)
+        check("output redactions audited", raw.count("cloakwall.redacted_output"), 4)
+        check("stats count redacted responses", g.stats()["responses_with_redactions"], 4)
+        check("chain intact after output events", g.stats()["audit_intact"], True)
+
+
+asyncio.run(output_tests())
+
 print(f"\n{PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)
