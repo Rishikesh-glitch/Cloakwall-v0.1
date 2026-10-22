@@ -31,28 +31,31 @@ model: "Patient <MRN>, email <EMAIL>, card <CARD>"
 ## Install
 
 ```bash
-pip install litellm
-git clone https://github.com/Rishikesh-glitch/Cloakwall-v0.1.git cloakwall
-PYTHONPATH=./cloakwall litellm --config cloakwall/examples/config.yaml
+pip install "cloakwall[litellm]"
 ```
 
-Or run the container:
+LiteLLM refuses to start without a master key (an API key for the proxy
+itself), so set one, then point LiteLLM at a config that enables the
+guardrail, such as [examples/config.yaml](https://github.com/Rishikesh-glitch/Cloakwall-v0.1/blob/main/examples/config.yaml):
+
+```bash
+export LITELLM_MASTER_KEY="sk-$(openssl rand -hex 32)"
+litellm --config config.yaml
+```
+
+Clients then call the proxy with `Authorization: Bearer $LITELLM_MASTER_KEY`.
+
+Or run the container, which installs the same package from PyPI:
 
 ```bash
 docker build -t cloakwall .
-docker run -p 4000:4000 -e OPENAI_API_KEY=sk-... cloakwall
+docker run -p 4000:4000 \
+  -e LITELLM_MASTER_KEY="sk-$(openssl rand -hex 32)" \
+  -e OPENAI_API_KEY=sk-... cloakwall
 ```
 
-## What it detects
-
-Email, credit cards (Luhn-validated), SSN, IBAN, AWS keys, API keys, JWTs,
-medical record numbers, NHS numbers (modulus-11 validated), phone numbers
-including international formats, IPv4, and dates of birth.
-
-The validators matter more than the patterns. Without a Luhn check every
-16-digit order number gets flagged; without the NHS checksum every US phone
-number gets labelled a health identifier. Both are the reason teams turn
-regex redaction off after a week.
+Run it on Linux in production. The audit log fsyncs every entry; that costs
+about 0.3 ms on Linux and about 100 ms on Windows (see Benchmarks).
 
 ## Where it looks
 
@@ -146,7 +149,7 @@ strace -f -e trace=connect python3 tests/test_cloakwall.py
 
 ## Benchmarks
 
-Measured, reproducible numbers are in [BENCHMARKS.md](BENCHMARKS.md):
+Measured, reproducible numbers are in [BENCHMARKS.md](https://github.com/Rishikesh-glitch/Cloakwall-v0.1/blob/main/BENCHMARKS.md):
 `python3 benchmarks/bench.py`. On a 2015 Core i3 under Linux, a clean
 request costs 0.05 ms and a request with PII, including its fsynced audit
 entry, about 1.8 ms.
@@ -168,6 +171,11 @@ model to ship into an air-gapped environment.
 Redaction is one-way. There is no un-redaction path, by design.
 
 Status: working, tested, not yet run in production anywhere.
+
+## Security
+
+Found a vulnerability, or a way PII gets past the redactor? Please report it
+privately; see [SECURITY.md](https://github.com/Rishikesh-glitch/Cloakwall-v0.1/blob/main/SECURITY.md).
 
 ## Licence
 

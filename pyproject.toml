@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cloakwall"
-version = "0.1.0"
+version = "0.1.1"
 description = "PII/PHI redaction and tamper-evident audit logging for LiteLLM. In-process, no sidecar, works air-gapped."
 readme = "README.md"
 license = "AGPL-3.0-only"
