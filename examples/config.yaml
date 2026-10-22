@@ -23,11 +23,16 @@ guardrails:
   - guardrail_name: cloakwall
     litellm_params:
       guardrail: cloakwall.guardrail.Cloakwall
-      mode: pre_call              # must be pre_call: during_call runs in
-                                  # parallel with the LLM call, so edits may
-                                  # not land before the request leaves
+      mode: pre_call              # must include pre_call: during_call runs
+                                  # in parallel with the LLM call, so edits
+                                  # may not land before the request leaves.
+                                  # Use [pre_call, post_call] with
+                                  # redact_output: true below.
       default_on: true
       redaction_mode: mask        # mask | hash | partial
       audit_path: /var/log/cloakwall/audit.log
       fail_closed: true           # reject rather than forward unscrubbed text
+      # redact_output: true       # also mask PII in model responses,
+      #                           # streamed or not (needs post_call mode)
+      # stream_holdback: 64       # chars held back while streaming
       # entities: [EMAIL, CARD, SSN, MRN, NHS]   # omit for all
