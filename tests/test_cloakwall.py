@@ -375,8 +375,11 @@ async def output_tests():
         check("function name sent once", names, ["lookup"])
 
         raw = open(path).read()
+        # Whole values only: a fragment like "4111" turns up by chance inside
+        # the log's hex hashes and timestamps about 1% of the time.
         check("output values absent from audit log",
-              any(v in raw for v in ("bob@clinic.org", "4111", "A1234567")), False)
+              any(v in raw for v in ("bob@clinic.org", "4111111111111111",
+                                     "4111 1111 1111 1111", "A1234567")), False)
         check("output redactions audited", raw.count("cloakwall.redacted_output"), 4)
         check("stats count redacted responses", g.stats()["responses_with_redactions"], 4)
         check("chain intact after output events", g.stats()["audit_intact"], True)
