@@ -20,6 +20,9 @@ guardrails:
       audit_path: /var/log/cloakwall/audit.log
 ```
 
+To mask PII in model responses as well, add `redact_output: true` and set
+`mode: [pre_call, post_call]`.
+
 ```
 user:  "Patient MRN: A1234567, email bob@clinic.org, card 4111111111111111"
 model: "Patient <MRN>, email <EMAIL>, card <CARD>"
@@ -29,7 +32,7 @@ model: "Patient <MRN>, email <EMAIL>, card <CARD>"
 
 ```bash
 pip install litellm
-git clone https://github.com/Rishikesh-glitch/cloakwall.git
+git clone https://github.com/Rishikesh-glitch/Cloakwall-v0.1.git cloakwall
 PYTHONPATH=./cloakwall litellm --config cloakwall/examples/config.yaml
 ```
 
@@ -50,6 +53,30 @@ The validators matter more than the patterns. Without a Luhn check every
 16-digit order number gets flagged; without the NHS checksum every US phone
 number gets labelled a health identifier. Both are the reason teams turn
 regex redaction off after a week.
+
+## Where it looks
+
+Every request field LiteLLM forwards that can carry text, on every endpoint:
+
+| Request | Fields redacted |
+|---------|-----------------|
+| Chat completions | `messages[].content` (text parts), `tool_calls[].function.arguments` |
+| Anthropic `/v1/messages` | top-level `system`, text blocks, `tool_use.input` (every string inside), `tool_result.content` |
+| Responses API | `input` (string or items), `function_call.arguments`, `function_call_output.output` |
+| Completions, image generation | `prompt` |
+| Embeddings | `input` strings (token-id lists pass through) |
+
+Image, audio and file parts pass through untouched. Ids, roles, model names
+and function names are never rewritten.
+
+With `redact_output: true`, responses are redacted too: chat content and
+tool-call arguments, text completions, and Anthropic content blocks.
+Streamed responses go through a stream redactor that holds back the last 64
+characters (`stream_holdback`) and only releases text at a boundary no
+entity spans, so a card number split across two chunks is still caught. The
+cost is that streamed text reaches the client 64 characters later; none of
+it is dropped. Output redaction is off by default, because it changes what
+callers receive.
 
 ## Three redaction modes
 
@@ -117,10 +144,17 @@ Verify it yourself:
 strace -f -e trace=connect python3 tests/test_cloakwall.py
 ```
 
+## Benchmarks
+
+Measured, reproducible numbers are in [BENCHMARKS.md](BENCHMARKS.md):
+`python3 benchmarks/bench.py`. On a 2015 Core i3 under Linux, a clean
+request costs 0.05 ms and a request with PII, including its fsynced audit
+entry, about 1.8 ms.
+
 ## Tests
 
 ```bash
-python3 tests/test_cloakwall.py     # 31 tests, no pytest required
+python3 tests/test_cloakwall.py     # 76 tests, no pytest required
 ```
 
 ## Limitations

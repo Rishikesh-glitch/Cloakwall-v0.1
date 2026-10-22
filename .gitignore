@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 *.log
 .venv/
+dist/
+build/
+*.egg-info/
+# private business plans, never publish
+founder/

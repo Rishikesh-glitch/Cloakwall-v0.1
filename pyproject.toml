@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cloakwall"
+version = "0.1.0"
+description = "PII/PHI redaction and tamper-evident audit logging for LiteLLM. In-process, no sidecar, works air-gapped."
+readme = "README.md"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+# authors = [{ name = "...", email = "..." }]   # set before the first upload
+keywords = ["pii", "phi", "redaction", "litellm", "guardrail", "audit-log", "llm", "compliance", "hipaa", "gdpr"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+    "Topic :: System :: Logging",
+]
+# The core is standard library only. Extras pull in what each adapter needs.
+dependencies = []
+
+[project.optional-dependencies]
+litellm = ["litellm>=1.60.0"]
+
+[project.urls]
+Homepage = "https://github.com/Rishikesh-glitch/Cloakwall-v0.1"
+Source = "https://github.com/Rishikesh-glitch/Cloakwall-v0.1"
+Issues = "https://github.com/Rishikesh-glitch/Cloakwall-v0.1/issues"
+Benchmarks = "https://github.com/Rishikesh-glitch/Cloakwall-v0.1/blob/main/BENCHMARKS.md"
+
+[tool.setuptools]
+packages = ["cloakwall"]
