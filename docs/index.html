@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cloakwall: stop AI apps leaking personal data</title>
+<meta name="description" content="Open-source PII/PHI redaction and tamper-evident audit logging for LiteLLM. Runs inside your network, works fully offline.">
+<meta property="og:title" content="Cloakwall: stop AI apps leaking personal data">
+<meta property="og:description" content="Open-source PII/PHI redaction and a tamper-evident audit log for LiteLLM. Runs inside your network, works fully offline.">
+<meta property="og:image" content="https://rishikesh-glitch.github.io/Cloakwall-v0.1/cloakwall-post-image.png">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f1720'/%3E%3Cpath d='M16 6l8 3v6c0 5-3.4 9-8 11-4.6-2-8-6-8-11V9z' fill='%2334d399'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #ffffff; --surface: #f4f7f9; --ink: #0f1720; --muted: #52606d;
+    --edge: #d9e1e7; --accent: #0b8a5f; --accent-ink: #ffffff; --code: #eef3f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1720; --surface: #182330; --ink: #e6edf3; --muted: #8b9bab;
+      --edge: #2c3c4e; --accent: #34d399; --accent-ink: #0f1720; --code: #1d2a38;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1720; --surface: #182330; --ink: #e6edf3; --muted: #8b9bab;
+    --edge: #2c3c4e; --accent: #34d399; --accent-ink: #0f1720; --code: #1d2a38;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 17px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  a { color: var(--accent); }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 16px; }
+  header.top { border-bottom: 1px solid var(--edge); }
+  header.top .wrap { display: flex; align-items: center; justify-content: space-between; height: 64px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 19px; color: var(--ink); text-decoration: none; }
+  .brand svg { width: 26px; height: 26px; }
+  nav a { margin-left: 22px; color: var(--muted); text-decoration: none; font-size: 15px; }
+  nav a:hover { color: var(--ink); }
+  .hero { padding-top: 72px; padding-bottom: 40px; }
+  .eyebrow { color: var(--accent); font-weight: 600; font-size: 14px; letter-spacing: .04em; text-transform: uppercase; }
+  h1 { font-size: clamp(34px, 5vw, 52px); line-height: 1.1; margin: 12px 0 18px; letter-spacing: -.02em; }
+  .lede { font-size: 20px; color: var(--muted); max-width: 700px; margin: 0 0 28px; }
+  .cta { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  .cta > * { min-width: 0; max-width: 100%; }
+  .btn { display: inline-block; padding: 12px 20px; border-radius: 10px; font-weight: 600; text-decoration: none; border: 1px solid var(--edge); color: var(--ink); }
+  .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  code, pre { font-family: Consolas, "SFMono-Regular", Menlo, monospace; }
+  .install { max-width: 100%; min-width: 0; background: var(--code); border: 1px solid var(--edge); border-radius: 10px; padding: 11px 16px; font-size: 15px; overflow-x: auto; white-space: nowrap; }
+  .shot { margin: 44px 0 8px; }
+  .shot img { width: 100%; height: auto; border-radius: 14px; border: 1px solid var(--edge); display: block; }
+  section { padding: 56px 0; border-top: 1px solid var(--edge); }
+  h2 { font-size: 30px; line-height: 1.2; margin: 0 0 14px; letter-spacing: -.01em; }
+  .sub { color: var(--muted); max-width: 720px; margin: 0 0 30px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 18px; }
+  .card { background: var(--surface); border: 1px solid var(--edge); border-radius: 14px; padding: 22px; }
+  .card h3 { margin: 0 0 8px; font-size: 18px; }
+  .card p { margin: 0; color: var(--muted); font-size: 15.5px; }
+  table { width: 100%; border-collapse: collapse; font-size: 15.5px; }
+  th, td { text-align: left; padding: 11px 12px; border-bottom: 1px solid var(--edge); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 14px; }
+  td.num { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .table-wrap { overflow-x: auto; }
+  .note { background: var(--surface); border-left: 3px solid var(--accent); border-radius: 8px; padding: 16px 18px; color: var(--muted); }
+  .note strong { color: var(--ink); }
+  ul.clean { padding-left: 20px; margin: 0; }
+  ul.clean li { margin: 6px 0; }
+  footer { border-top: 1px solid var(--edge); padding: 28px 0 40px; color: var(--muted); font-size: 14.5px; }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 12px 24px; justify-content: space-between; }
+  @media (max-width: 640px) {
+    nav a:not(:last-child) { display: none; }
+    nav a { margin-left: 0; }
+    .install { white-space: normal; word-break: break-word; }
+    th, td { padding: 9px 8px; }
+    .hero { padding-top: 48px; }
+    section { padding: 44px 0; }
+  }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="#">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#0f1720"/><path d="M16 6l8 3v6c0 5-3.4 9-8 11-4.6-2-8-6-8-11V9z" fill="#34d399"/></svg>
+      Cloakwall
+    </a>
+    <nav>
+      <a href="#how">How it works</a>
+      <a href="#coverage">Coverage</a>
+      <a href="#numbers">Benchmarks</a>
+      <a href="#partners">Design partners</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="wrap hero">
+    <div class="eyebrow">Open source · works fully offline</div>
+    <h1>Stop your AI apps leaking personal data.</h1>
+    <p class="lede">Cloakwall removes personal and health data from every LLM request before it leaves your network, and keeps a tamper-evident audit log you can show your auditor.</p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/Rishikesh-glitch/Cloakwall-v0.1">View on GitHub</a>
+      <a class="btn" href="#partners">Become a design partner</a>
+      <code class="install">pip install "cloakwall[litellm]"</code>
+    </div>
+    <div class="shot">
+      <img src="cloakwall-post-image.png" width="1200" height="675"
+           alt="Example: a user message containing a patient record number, an email, a card number and a phone number. The AI model receives the same message with those values replaced by labels such as MRN, EMAIL, CARD and PHONE, and the audit log records the types and counts, never the values.">
+    </div>
+  </div>
+
+  <section id="problem">
+    <div class="wrap">
+      <h2>The problem</h2>
+      <p class="sub">Teams are wiring LLMs and AI agents into products that handle patient records, card numbers and customer identities. Every prompt, and every tool call an agent makes, can carry that data to an outside model provider. In healthcare and finance the next question is always the same: <strong>can you prove it didn't happen?</strong></p>
+    </div>
+  </section>
+
+  <section id="how">
+    <div class="wrap">
+      <h2>How it works</h2>
+      <p class="sub">Cloakwall is a guardrail for <a href="https://github.com/BerriAI/litellm">LiteLLM</a>, the open-source gateway many teams use to route AI traffic. Six lines of configuration and it runs inside the gateway you already have.</p>
+      <div class="grid">
+        <div class="card"><h3>1. Detect</h3><p>Finds emails, card numbers, SSNs, IBANs, API keys, medical record and NHS numbers, phone numbers, IP addresses and dates of birth.</p></div>
+        <div class="card"><h3>2. Check</h3><p>Validates each match: cards must pass the Luhn check, NHS numbers the mod-11 check. That keeps order numbers and phone numbers from being flagged by mistake.</p></div>
+        <div class="card"><h3>3. Replace</h3><p>Swaps the value for a label (&lt;EMAIL&gt;), a consistent code (&lt;EMAIL:7f3a91c2&gt;) or the last four digits (&lt;CARD:****1111&gt;), so the AI can still help.</p></div>
+        <div class="card"><h3>4. Record</h3><p>Writes a hash-chained audit entry: what type was found and how many, never the value. Edited, deleted or truncated entries are detectable. Exports to Splunk, Datadog or Elastic.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="coverage">
+    <div class="wrap">
+      <h2>It checks every path, not just the chat message</h2>
+      <p class="sub">Most filters only look at the message text. AI agents leak through other paths too.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Request type</th><th>What Cloakwall cleans</th></tr></thead>
+          <tbody>
+            <tr><td>Chat completions</td><td>Messages, including tool-call arguments</td></tr>
+            <tr><td>Anthropic messages</td><td>System prompt, text blocks, tool_use input, tool_result content</td></tr>
+            <tr><td>Responses API</td><td>Input items, function-call arguments and outputs</td></tr>
+            <tr><td>Completions, images, embeddings</td><td>Prompt and input text</td></tr>
+            <tr><td>Model replies (optional)</td><td>Content and tool calls, including <strong>streamed</strong> replies: a card number split across two chunks is still caught</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section id="offline">
+    <div class="wrap">
+      <h2>Built for networks where data can't leave</h2>
+      <div class="grid">
+        <div class="card"><h3>Runs in-process</h3><p>No sidecar containers, no external service, no AI model to download.</p></div>
+        <div class="card"><h3>Works air-gapped</h3><p>The core is pure Python standard library and opens no network connections. Pair it with a local model and nothing leaves your network.</p></div>
+        <div class="card"><h3>Open source</h3><p>AGPL-3.0. Your security team can read every line before trusting it. A commercial licence is available for closed-source use.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="numbers">
+    <div class="wrap">
+      <h2>Measured, not promised</h2>
+      <p class="sub">Measured on a deliberately modest machine: a 2015 Intel Core i3 laptop, Linux. The script to reproduce these numbers is in the repository.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Scenario</th><th>Typical time (P50)</th></tr></thead>
+          <tbody>
+            <tr><td>Request with no personal data</td><td class="num">0.05 ms</td></tr>
+            <tr><td>Request with personal data, including a durable audit entry</td><td class="num">1.8 ms</td></tr>
+            <tr><td>Audit log entry, written safely to disk</td><td class="num">0.28 ms</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p style="margin-top:16px"><a href="https://github.com/Rishikesh-glitch/Cloakwall-v0.1/blob/main/BENCHMARKS.md">Full benchmarks, including what isn't measured yet →</a></p>
+    </div>
+  </section>
+
+  <section id="limits">
+    <div class="wrap">
+      <h2>Honest limits</h2>
+      <div class="note">
+        <strong>Cloakwall finds patterns, not meaning.</strong> It catches structured identifiers such as numbers, emails and keys, but not a person's name or a medical condition written in an ordinary sentence. If you need that, NLP tools such as Microsoft Presidio catch more, at the cost of extra services and no audit trail.
+        <br><br>
+        <strong>It's early.</strong> Version 0.1, with 76 automated tests and checks against the real LiteLLM proxy, but not yet running in production anywhere. That's why we're looking for design partners.
+      </div>
+    </div>
+  </section>
+
+  <section id="partners">
+    <div class="wrap">
+      <h2>Design partners wanted</h2>
+      <p class="sub">We're looking for <strong>5 teams</strong> in healthcare, fintech or other regulated industries running LLMs, to use Cloakwall in a real setting and shape what comes next.</p>
+      <div class="grid">
+        <div class="card"><h3>What you get</h3>
+          <ul class="clean">
+            <li>The commercial licence at a reduced first-year price</li>
+            <li>Direct support from the founder</li>
+            <li>Help mapping the audit trail to HIPAA, GDPR and SOC 2</li>
+            <li>A real say in the roadmap</li>
+          </ul>
+        </div>
+        <div class="card"><h3>What we ask</h3>
+          <ul class="clean">
+            <li>Run it on real traffic</li>
+            <li>A short call each month</li>
+            <li>Honest feedback, and a case study if it works for you</li>
+          </ul>
+        </div>
+      </div>
+      <p style="margin-top:26px">
+        <a class="btn primary" href="mailto:r88747000@gmail.com?subject=Cloakwall%20design%20partner">Email the founder</a>
+      </p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Cloakwall · Built in Sri Lanka for teams everywhere</span>
+    <span>
+      <a href="https://github.com/Rishikesh-glitch/Cloakwall-v0.1">GitHub</a> ·
+      <a href="https://pypi.org/project/cloakwall/">PyPI</a> ·
+      <a href="https://github.com/Rishikesh-glitch/Cloakwall-v0.1/blob/main/SECURITY.md">Security</a> ·
+      <a href="https://github.com/Rishikesh-glitch/Cloakwall-v0.1/blob/main/LICENSE">AGPL-3.0</a>
+    </span>
+  </div>
+</footer>
+
+</body>
+</html>
