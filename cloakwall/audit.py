@@ -85,7 +85,17 @@ class AuditLog:
                        "ts": datetime.now(timezone.utc).isoformat()}, fh)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, self.anchor_path)
+        # Windows refuses to replace a file another thread has open for
+        # reading (verify() reads the anchor). The reader holds it for
+        # microseconds, so retry briefly rather than fail the append.
+        for attempt in range(20):
+            try:
+                os.replace(tmp, self.anchor_path)
+                return
+            except PermissionError:
+                if attempt == 19:
+                    raise
+                time.sleep(0.005 * (attempt + 1))
 
     def read_anchor(self) -> dict | None:
         try:

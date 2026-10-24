@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cloakwall"
-version = "0.1.1"
-description = "PII/PHI redaction and tamper-evident audit logging for LiteLLM. In-process, no sidecar, works air-gapped."
+version = "0.2.0"
+description = "PII/PHI redaction and tamper-evident audit logging for LLM traffic: a standalone OpenAI-compatible proxy or a LiteLLM guardrail. Works air-gapped."
 readme = "README.md"
 license = "AGPL-3.0-only"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = [{ name = "S.Rishikesh", email = "r88747000@gmail.com" }]
-keywords = ["pii", "phi", "redaction", "litellm", "guardrail", "audit-log", "llm", "compliance", "hipaa", "gdpr"]
+keywords = ["pii", "phi", "redaction", "openai", "proxy", "litellm", "guardrail", "audit-log", "llm", "compliance", "hipaa", "gdpr"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -25,7 +25,11 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-litellm = ["litellm>=1.60.0"]
+# 1.82.7, 1.82.8 (Mar 2026) and 1.107.0 (Oct 2026) were hijacked releases.
+litellm = ["litellm>=1.60.0,!=1.82.7,!=1.82.8,!=1.107.0"]
+
+[project.scripts]
+cloakwall = "cloakwall.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Rishikesh-glitch/Cloakwall-v0.1"
