@@ -25,6 +25,7 @@ jobs:
         run: |
           python tests/test_cloakwall.py
           python tests/test_proxy.py
+          python tests/test_scan.py
       - name: Run benchmarks (smoke check)
         run: python benchmarks/bench.py
 

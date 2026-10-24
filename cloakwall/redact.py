@@ -100,6 +100,9 @@ DETECTORS: list[Detector] = [
 
 DEFAULT_ENTITIES = {d.name for d in DETECTORS}
 
+# Prefixes of key formats that may contain no digit at all.
+_KEY_PREFIXES = ("sk-", "sk_", "pk-", "pk_", "rk-", "rk_", "AKIA", "ASIA", "eyJ")
+
 
 @dataclass
 class Redaction:
@@ -141,10 +144,16 @@ class Redactor:
         self.detectors = [d for d in (list(DETECTORS) + (extra or []))
                           if d.name in self.entities]
 
-        # Cheap global gate. Every detector needs a digit or an "@", so prose
-        # with neither skips the regex engine entirely. Most system prompts
-        # and most model output land here.
+        # Cheap global gate: prose that cannot contain any entity skips the
+        # regex engine entirely. Most entities need a digit or an "@", but key
+        # formats can be letters only (sk-..., AKIA..., a JWT's eyJ...), so
+        # their prefixes open the gate too -- checked as plain substrings,
+        # which is several times faster than adding them to the regex. Most
+        # system prompts and most model output still land on the fast path.
         self._gate = re.compile(r"[\d@]")
+
+    def _may_contain(self, text: str) -> bool:
+        return bool(self._gate.search(text)) or any(p in text for p in _KEY_PREFIXES)
 
     def _token(self, entity: str, value: str, keep_tail: int) -> str:
         if self.mode == "mask":
@@ -161,7 +170,7 @@ class Redactor:
         if not text:
             return Result(text="", redactions=[])
 
-        if not self._gate.search(text):
+        if not self._may_contain(text):
             return Result(text=text, redactions=[])
 
         # Per-detector literal gate. A substring test runs at C speed and is
