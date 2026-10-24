@@ -1,13 +1,107 @@
 # Cloakwall
 
-PII/PHI redaction and tamper-evident audit logging for LiteLLM. Runs
-in-process — no sidecar container, no external endpoint, no model download.
+PII/PHI redaction and tamper-evident audit logging for LLM traffic. It
+strips emails, card numbers, SSNs, medical record numbers, API keys and more
+from requests **before they leave your machine**, and records every
+redaction in a hash-chained audit log that shows if anyone edits it.
+
+No sidecar, no external service, no model download, no third-party
+dependencies. It runs unchanged in an air-gapped network.
+
+```
+user:  "Patient MRN: A1234567, email bob@clinic.org, card 4111111111111111"
+model: "Patient <MRN>, email <EMAIL>, card <CARD>"
+```
+
+Two ways to run it:
+
+| | Standalone proxy (`cloakwall serve`) | LiteLLM guardrail |
+|---|---|---|
+| Works with | any OpenAI-compatible app, SDK or agent | an existing LiteLLM proxy |
+| Dependencies | none (standard library only) | LiteLLM |
+| Restore real values in replies | yes (`--restore`) | no |
+
+## Standalone proxy
+
+```bash
+pip install cloakwall
+export OPENAI_API_KEY=sk-...
+cloakwall serve --upstream https://api.openai.com/v1 --upstream-key-env OPENAI_API_KEY
+```
+
+Then point your app at `http://127.0.0.1:8787/v1` instead of the provider.
+Any OpenAI-compatible upstream works: OpenAI, OpenRouter, Together, a
+company gateway, a local vLLM. The proxy listens on localhost only unless
+you pass `--host`.
+
+What happens to replies:
+
+- **default:** passed through unchanged.
+- **`--redact-output`:** PII in replies is masked too, streamed or not.
+- **`--restore`:** the reverse. Requests are redacted with one token per value
+  (`<EMAIL:7f3a91c2>`), and the original values are put back into the reply
+  before your app sees it. The model never sees the data and your app gets a
+  normal answer. For an agent this means a command can use your real API key
+  without the key ever leaving your machine. The token-to-value map lives in
+  memory for one request and is never written anywhere.
+
+Both work on streamed replies: text is held back briefly so a value, or a
+token, split across chunks is still caught whole. Tool-call arguments are
+restored as valid JSON.
+
+Other options: `--block-on CARD SSN` rejects requests containing those
+entities instead of redacting them. `--entities` limits what is detected.
+`--audit-path` sets the log file, and `cloakwall verify <log>` checks it.
+
+If you omit `--upstream-key-env`, the caller's `Authorization` header is
+passed upstream instead. Keys are never logged, and never read from the
+command line, which ends up in shell history.
+
+### Agent harnesses
+
+Coding and agent tools read whole projects, `.env` files included, and send
+what they read to the model. Run the proxy with `--restore` and point the tool
+at it.
+
+**pi** (`~/.pi/agent/models.json`):
+
+```json
+{
+  "providers": {
+    "cloakwall": {
+      "baseUrl": "http://127.0.0.1:8787/v1",
+      "api": "openai-completions",
+      "apiKey": "$OPENAI_API_KEY",
+      "models": [{ "id": "gpt-4o" }]
+    }
+  }
+}
+```
+
+Then `pi --model cloakwall/gpt-4o`. **oh-my-pi** is built on pi: add the
+same provider through its custom-provider settings (see the oh-my-pi docs).
+
+**Hermes Agent:** run `hermes model`, choose *Custom endpoint*, and enter
+`http://127.0.0.1:8787/v1` as the base URL.
+
+Streaming output processing (`--redact-output`, `--restore`) covers
+`/chat/completions` and `/completions`, which is what these tools use. A
+streamed request to another endpoint with output processing on is refused
+rather than passed through unprocessed.
+
+## LiteLLM guardrail
 
 LiteLLM's open-source guardrail framework supports custom guardrails plus
 Presidio, but Presidio means deploying and maintaining two extra containers,
 and audit logs, SIEM export and SSO sit behind the Enterprise licence.
-Cloakwall gives you redaction and a compliance-grade audit trail as one
-dependency-free plugin.
+Cloakwall adds redaction and a compliance-grade audit trail as one plugin.
+
+```bash
+pip install "cloakwall[litellm]"
+```
+
+The `litellm` extra excludes 1.82.7, 1.82.8 and 1.107.0, LiteLLM releases
+that were hijacked to steal credentials in 2026. Pin the version you deploy.
 
 ```yaml
 guardrails:
@@ -23,17 +117,6 @@ guardrails:
 To mask PII in model responses as well, add `redact_output: true` and set
 `mode: [pre_call, post_call]`.
 
-```
-user:  "Patient MRN: A1234567, email bob@clinic.org, card 4111111111111111"
-model: "Patient <MRN>, email <EMAIL>, card <CARD>"
-```
-
-## Install
-
-```bash
-pip install "cloakwall[litellm]"
-```
-
 LiteLLM refuses to start without a master key (an API key for the proxy
 itself), so set one, then point LiteLLM at a config that enables the
 guardrail, such as [examples/config.yaml](https://github.com/Rishikesh-glitch/Cloakwall-v0.1/blob/main/examples/config.yaml):
@@ -45,7 +128,8 @@ litellm --config config.yaml
 
 Clients then call the proxy with `Authorization: Bearer $LITELLM_MASTER_KEY`.
 
-Or run the container, which installs the same package from PyPI:
+Or run the container, which installs the same packages from PyPI with
+LiteLLM pinned:
 
 ```bash
 docker build -t cloakwall .
@@ -59,7 +143,8 @@ about 0.3 ms on Linux and about 100 ms on Windows (see Benchmarks).
 
 ## Where it looks
 
-Every request field LiteLLM forwards that can carry text, on every endpoint:
+Every request field that can carry text, on every endpoint. The proxy and
+the guardrail check the same fields:
 
 | Request | Fields redacted |
 |---------|-----------------|
@@ -72,7 +157,7 @@ Every request field LiteLLM forwards that can carry text, on every endpoint:
 Image, audio and file parts pass through untouched. Ids, roles, model names
 and function names are never rewritten.
 
-With `redact_output: true`, responses are redacted too: chat content and
+With `redact_output: true` (`--redact-output` on the proxy), responses are redacted too: chat content and
 tool-call arguments, text completions, and Anthropic content blocks.
 Streamed responses go through a stream redactor that holds back the last 64
 characters (`stream_holdback`) and only releases text at a boundary no
@@ -137,9 +222,10 @@ to, or fails, an LLM request — the local log is the system of record.
 ## Air-gapped
 
 The core is pure standard library. Nothing in the redaction, audit or hashing
-path opens a socket, so it runs unchanged in an isolated cluster. Point
-LiteLLM at a local vLLM or Ollama endpoint and no data leaves your network at
-all.
+path opens a socket, so it runs unchanged in an isolated cluster. The proxy
+connects to exactly one place, the upstream you give it. Point that (or
+LiteLLM) at a local vLLM or Ollama endpoint and no data leaves your network
+at all.
 
 Verify it yourself:
 
@@ -158,6 +244,7 @@ entry, about 1.8 ms.
 
 ```bash
 python3 tests/test_cloakwall.py     # 76 tests, no pytest required
+python3 tests/test_proxy.py         # 42 proxy tests, fake upstream included
 ```
 
 ## Limitations
@@ -168,7 +255,14 @@ models are better and Cloakwall is not a replacement for them. What Cloakwall
 gives up in recall it gains in having no dependencies, no sidecar and no
 model to ship into an air-gapped environment.
 
-Redaction is one-way. There is no un-redaction path, by design.
+Redaction is one-way in the guardrail and in the proxy's default and
+`--redact-output` modes. Only `--restore` puts values back, and only into the
+reply to the request they came from, from a map held in memory for that
+request alone.
+
+Cloakwall runs inside your process. If the process around it is compromised
+(a hijacked dependency, say), no in-process control can protect the data.
+Pin and verify what you deploy.
 
 Status: working, tested, not yet run in production anywhere.
 

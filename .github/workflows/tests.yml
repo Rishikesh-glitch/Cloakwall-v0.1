@@ -22,7 +22,9 @@ jobs:
           python-version: ${{ matrix.python }}
       # The core suite needs nothing but the standard library.
       - name: Run tests
-        run: python tests/test_cloakwall.py
+        run: |
+          python tests/test_cloakwall.py
+          python tests/test_proxy.py
       - name: Run benchmarks (smoke check)
         run: python benchmarks/bench.py
 
