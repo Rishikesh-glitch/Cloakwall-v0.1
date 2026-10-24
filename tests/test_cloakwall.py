@@ -121,6 +121,36 @@ with tempfile.TemporaryDirectory() as d:
     seqs = [json.loads(l)["seq"] for l in open(log.path) if l.strip()]
     check("sequence numbers are contiguous", seqs, [1, 2, 3, 4, 5])
 
+section("Concurrent appends and verifies")
+with tempfile.TemporaryDirectory() as d:
+    import threading
+    log = AuditLog(os.path.join(d, "c.log"))
+    errors = []
+
+    def writer(k):
+        try:
+            for i in range(15):
+                log.append("e", k=k, n=i)
+        except Exception as exc:
+            errors.append(repr(exc))
+
+    def reader():
+        try:
+            for _ in range(60):
+                log.verify()
+        except Exception as exc:
+            errors.append(repr(exc))
+
+    threads = [threading.Thread(target=writer, args=(k,)) for k in range(4)]
+    threads += [threading.Thread(target=reader) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    check("no errors while appending and verifying at once", errors, [])
+    check("all 60 entries written, chain intact",
+          (log.read_anchor()["seq"], log.verify()[0]), (60, True))
+
 # ---------------------------------------------------------------- guardrail
 section("Guardrail hook")
 
