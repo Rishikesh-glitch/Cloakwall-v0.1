@@ -49,6 +49,11 @@ check("us phone is PHONE not NHS", r.redact("call 555-867-5309").text, "call <PH
 check("real nhs number", r.redact("nhs 943 476 5919").text, "nhs <NHS>")
 check("clean text untouched", r.redact("the quick brown fox").text,
       "the quick brown fox")
+# Keys with no digit must not slip past the fast-path gate.
+check("letters-only API key", r.redact("KEY=sk-proj-AbCdEfGhIjKlMnOpQrStUv").text, "KEY=<API_KEY>")
+check("letters-only AWS key", r.redact("id AKIAABCDEFGHIJKLMNOP").text, "id <AWS_KEY>")
+check("letters-only JWT", r.redact("t eyJhbGciOiJIUzI.eyJzdWIiOiJhYmMifQ.SflKxwRJSMeKKF").text,
+      "t <BEARER>")
 
 # ---------------------------------------------------------------- validators
 section("Validators")

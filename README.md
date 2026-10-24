@@ -13,7 +13,29 @@ user:  "Patient MRN: A1234567, email bob@clinic.org, card 4111111111111111"
 model: "Patient <MRN>, email <EMAIL>, card <CARD>"
 ```
 
-Two ways to run it:
+Start by checking what you would be leaking:
+
+```bash
+pip install cloakwall
+cloakwall scan ./my-project ./chat-logs
+```
+
+```
+Found 266 sensitive values in 5 files:
+  EMAIL        214
+  CARD          38
+  API_KEY       12
+  AWS_KEY        2
+```
+
+`scan` reads files on your machine, including `.env` files and JSON or JSONL
+chat logs, and reports what kind of sensitive value it found, how many and
+where (`--details` adds file and line). It never prints a value, never
+writes anything and never connects to the network. It exits with 1 when it
+finds something, so it can also guard a CI pipeline. (The numbers above are
+an illustration of the format.)
+
+Then protect the traffic, one of two ways:
 
 | | Standalone proxy (`cloakwall serve`) | LiteLLM guardrail |
 |---|---|---|
@@ -237,14 +259,15 @@ strace -f -e trace=connect python3 tests/test_cloakwall.py
 
 Measured, reproducible numbers are in [BENCHMARKS.md](https://github.com/Rishikesh-glitch/Cloakwall-v0.1/blob/main/BENCHMARKS.md):
 `python3 benchmarks/bench.py`. On a 2015 Core i3 under Linux, a clean
-request costs 0.05 ms and a request with PII, including its fsynced audit
+request costs about 0.06 ms and a request with PII, including its fsynced audit
 entry, about 1.8 ms.
 
 ## Tests
 
 ```bash
-python3 tests/test_cloakwall.py     # 76 tests, no pytest required
+python3 tests/test_cloakwall.py     # 81 tests, no pytest required
 python3 tests/test_proxy.py         # 42 proxy tests, fake upstream included
+python3 tests/test_scan.py          # 22 scanner tests
 ```
 
 ## Limitations

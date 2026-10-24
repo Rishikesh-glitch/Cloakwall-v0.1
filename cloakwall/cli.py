@@ -65,6 +65,23 @@ def _serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _scan(args: argparse.Namespace) -> int:
+    import json
+    from .redact import Redactor
+    from .scan import format_report, scan
+
+    redactor = Redactor(entities=set(args.entities) if args.entities else None)
+    report = scan(args.paths, redactor=redactor, max_bytes=int(args.max_mb * 1024 * 1024),
+                  stdin=sys.stdin)
+    if args.json:
+        print(json.dumps(report.to_dict(details=args.details), indent=2))
+    else:
+        print(format_report(report, details=args.details))
+    if report.files_scanned == 0 and report.skipped:
+        return 2
+    return 1 if report.findings else 0
+
+
 def _verify(args: argparse.Namespace) -> int:
     from .audit import AuditLog
     ok, msg = AuditLog(args.path).verify()
@@ -101,6 +118,21 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--stream-holdback", type=int, default=64,
                    help="characters held back while streaming with --redact-output")
     s.set_defaults(func=_serve)
+
+    sc = sub.add_parser("scan", help="report the sensitive data in files, without showing it",
+                        description="Scan files or folders on this machine for emails, card "
+                                    "numbers, API keys and other sensitive values. Values are "
+                                    "never shown and nothing is sent anywhere. Exit status: "
+                                    "0 nothing found, 1 found, 2 error.")
+    sc.add_argument("paths", nargs="+", help="files or folders to scan; - reads standard input")
+    sc.add_argument("--details", action="store_true",
+                    help="list each finding's file and line (never the value)")
+    sc.add_argument("--json", action="store_true", help="print the report as JSON")
+    sc.add_argument("--entities", nargs="+", choices=sorted(DEFAULT_ENTITIES), metavar="ENTITY",
+                    help="only look for these")
+    sc.add_argument("--max-mb", type=float, default=10.0,
+                    help="skip files larger than this many MB (default 10)")
+    sc.set_defaults(func=_scan)
 
     v = sub.add_parser("verify", help="check an audit log's hash chain and anchor")
     v.add_argument("path", help="audit log file")
