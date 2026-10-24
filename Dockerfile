@@ -7,7 +7,7 @@ FROM python:3.12-slim
 # Installs the published package, the same thing customers pip install.
 # LiteLLM is pinned: releases 1.82.7, 1.82.8 and 1.107.0 were hijacked in 2026.
 # Bump deliberately, after checking the release is clean.
-ARG CLOAKWALL_VERSION=0.2.0
+ARG CLOAKWALL_VERSION=0.3.0
 ARG LITELLM_VERSION=1.106.0
 RUN pip install --no-cache-dir "litellm[proxy]==${LITELLM_VERSION}" "cloakwall==${CLOAKWALL_VERSION}" \
  && useradd -r -u 65532 -s /usr/sbin/nologin cloakwall \
