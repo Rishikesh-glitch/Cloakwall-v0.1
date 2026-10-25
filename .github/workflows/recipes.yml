@@ -1,0 +1,105 @@
+name: run recipes
+
+# Installs each "run it permanently" recipe in examples/run/ for real, on a
+# real machine of that OS, and checks the proxy answers. If a recipe in the
+# README breaks, this fails.
+
+on:
+  push:
+    paths: ["examples/run/**", ".github/workflows/recipes.yml"]
+  pull_request:
+    paths: ["examples/run/**", ".github/workflows/recipes.yml"]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  linux-systemd:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install as a systemd user service, exactly as the README says
+        run: |
+          pipx install cloakwall
+          mkdir -p ~/.config/cloakwall ~/.config/systemd/user
+          printf 'CLOAKWALL_UPSTREAM=https://api.openai.com/v1\nOPENAI_API_KEY=sk-ci-dummy\n' > ~/.config/cloakwall/env
+          chmod 600 ~/.config/cloakwall/env
+          cp examples/run/cloakwall.service ~/.config/systemd/user/
+          sudo loginctl enable-linger "$USER"
+          export XDG_RUNTIME_DIR=/run/user/$(id -u)
+          for i in $(seq 1 30); do [ -S "$XDG_RUNTIME_DIR/bus" ] && break; sleep 1; done
+          systemctl --user daemon-reload
+          systemctl --user enable --now cloakwall
+      - name: Proxy answers
+        run: |
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8787/cloakwall/health && exit 0; sleep 1; done
+          XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user status cloakwall --no-pager; exit 1
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run the proxy image, exactly as the README says
+        run: |
+          docker build -t cloakwall-proxy -f examples/run/Dockerfile.proxy .
+          OPENAI_API_KEY=sk-ci-dummy docker run -d --name cloakwall --restart unless-stopped \
+            -p 127.0.0.1:8787:8787 -e OPENAI_API_KEY -v cloakwall-audit:/data \
+            cloakwall-proxy --upstream https://api.openai.com/v1 --upstream-key-env OPENAI_API_KEY --restore
+      - name: Proxy answers, as a non-root user
+        run: |
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8787/cloakwall/health && break; sleep 1; done
+          curl -sf http://127.0.0.1:8787/cloakwall/health | grep -q '"restore": true'
+          test "$(docker exec cloakwall id -u)" = 65532
+
+  macos-launchd:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install as a launchd agent, exactly as the README says
+        run: |
+          python -m pip install pipx && python -m pipx install cloakwall
+          # A throwaway keychain stands in for the login keychain on CI.
+          security create-keychain -p ci ci.keychain
+          security unlock-keychain -p ci ci.keychain
+          security list-keychains -d user -s ci.keychain $(security list-keychains -d user | tr -d '"')
+          security add-generic-password -s cloakwall-upstream -a "$USER" -w sk-ci-dummy ci.keychain
+          plutil -lint examples/run/com.cloakwall.proxy.plist
+          mkdir -p ~/.cloakwall ~/Library/LaunchAgents
+          cp examples/run/cloakwall-macos.sh ~/.cloakwall/run.sh && chmod 700 ~/.cloakwall/run.sh
+          sed "s#__HOME__#$HOME#g" examples/run/com.cloakwall.proxy.plist > ~/Library/LaunchAgents/com.cloakwall.proxy.plist
+          launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cloakwall.proxy.plist
+      - name: Proxy answers
+        run: |
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8787/cloakwall/health && exit 0; sleep 1; done
+          cat ~/Library/Logs/cloakwall/proxy.log || true; exit 1
+
+  windows-task:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install as a scheduled task, exactly as the README says
+        shell: pwsh
+        run: |
+          python -m pip install cloakwall
+          [Environment]::SetEnvironmentVariable("OPENAI_API_KEY", "sk-ci-dummy", "User")
+          # CI has no interactive logon session, so the task runs as S4U here;
+          # on a real PC the default (Interactive, at logon) is used.
+          ./examples/run/windows-task.ps1 -LogonType S4U
+      - name: Proxy answers
+        shell: pwsh
+        run: |
+          foreach ($i in 1..30) {
+            try { Invoke-RestMethod http://127.0.0.1:8787/cloakwall/health -TimeoutSec 2; exit 0 } catch { Start-Sleep 1 }
+          }
+          Get-ScheduledTask -TaskName Cloakwall | Get-ScheduledTaskInfo
+          exit 1
