@@ -111,6 +111,88 @@ Streaming output processing (`--redact-output`, `--restore`) covers
 streamed request to another endpoint with output processing on is refused
 rather than passed through unprocessed.
 
+### Point every app at it at once
+
+The official OpenAI SDKs, and many tools built on them, read
+`OPENAI_BASE_URL`. Set it once and every such app on the machine goes
+through Cloakwall, with no code change:
+
+```bash
+export OPENAI_BASE_URL=http://127.0.0.1:8787/v1      # macOS / Linux: add to ~/.zshrc or ~/.bashrc
+setx OPENAI_BASE_URL http://127.0.0.1:8787/v1        # Windows: permanent, for new terminals
+```
+
+### Run it permanently
+
+The proxy is a background service: start it once and it keeps running.
+Each recipe below is a file in
+[`examples/run/`](https://github.com/Rishikesh-glitch/Cloakwall-v0.1/tree/main/examples/run),
+and each is installed for real on a fresh machine of that OS by
+[CI](https://github.com/Rishikesh-glitch/Cloakwall-v0.1/blob/main/.github/workflows/recipes.yml)
+on every change. None of them puts the provider key on a command line or in
+the service definition.
+
+**Linux (systemd user service),** which starts at login and restarts if it stops:
+
+```bash
+pipx install cloakwall
+mkdir -p ~/.config/cloakwall ~/.config/systemd/user
+printf 'CLOAKWALL_UPSTREAM=https://api.openai.com/v1\nOPENAI_API_KEY=sk-...\n' > ~/.config/cloakwall/env
+chmod 600 ~/.config/cloakwall/env
+curl -fsSL https://raw.githubusercontent.com/Rishikesh-glitch/Cloakwall-v0.1/main/examples/run/cloakwall.service \
+  | sed "s#__CLOAKWALL__#$(command -v cloakwall)#" > ~/.config/systemd/user/cloakwall.service
+systemctl --user daemon-reload && systemctl --user enable --now cloakwall
+```
+
+**macOS (launchd agent),** with the key kept in the Keychain:
+
+```bash
+pipx install cloakwall
+security add-generic-password -s cloakwall-upstream -a "$USER" -w     # prompts for the key
+mkdir -p ~/.cloakwall ~/Library/LaunchAgents
+B=https://raw.githubusercontent.com/Rishikesh-glitch/Cloakwall-v0.1/main/examples/run
+curl -fsSL "$B/cloakwall-macos.sh" | sed "s#__CLOAKWALL__#$(command -v cloakwall)#" > ~/.cloakwall/run.sh
+chmod 700 ~/.cloakwall/run.sh
+curl -fsSL "$B/com.cloakwall.proxy.plist" | sed "s#__HOME__#$HOME#g" > ~/Library/LaunchAgents/com.cloakwall.proxy.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cloakwall.proxy.plist
+```
+
+**Windows (scheduled task at logon, no window),** in PowerShell:
+
+```powershell
+pip install cloakwall
+[Environment]::SetEnvironmentVariable("OPENAI_API_KEY", "sk-...", "User")
+Invoke-WebRequest -OutFile windows-task.ps1 `
+  https://raw.githubusercontent.com/Rishikesh-glitch/Cloakwall-v0.1/main/examples/run/windows-task.ps1
+powershell -ExecutionPolicy Bypass -File windows-task.ps1
+```
+
+**Docker,** from a clone of this repository, reachable from this machine only,
+running as a non-root user:
+
+```bash
+docker build -t cloakwall-proxy -f examples/run/Dockerfile.proxy .
+docker run -d --name cloakwall --restart unless-stopped \
+  -p 127.0.0.1:8787:8787 -e OPENAI_API_KEY -v cloakwall-audit:/data \
+  cloakwall-proxy --upstream https://api.openai.com/v1 --upstream-key-env OPENAI_API_KEY --restore
+```
+
+**GitHub Codespaces / dev containers:** copy
+[`devcontainer.json`](https://github.com/Rishikesh-glitch/Cloakwall-v0.1/blob/main/examples/run/devcontainer.json)
+into the project's `.devcontainer/`, and add the key as a Codespaces secret
+named `OPENAI_API_KEY`. Every Codespace then starts with the proxy running and
+`OPENAI_BASE_URL` already pointing at it.
+
+Each recipe uses `--restore` and OpenAI as the upstream; change either in the
+file. Check it is running with `curl http://127.0.0.1:8787/cloakwall/health`.
+
+**One proxy for a team or company.** Run it once on a server inside your
+network rather than on every laptop, so there is one audit trail to send to
+your SIEM. The proxy has no client authentication of its own yet, so on a
+shared host: don't set `--upstream-key-env` (each app then sends its own
+provider key, which is passed through), and put the proxy behind your
+existing ingress or gateway for TLS and access control.
+
 ## LiteLLM guardrail
 
 LiteLLM's open-source guardrail framework supports custom guardrails plus

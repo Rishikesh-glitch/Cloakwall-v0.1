@@ -1,0 +1,22 @@
+# The Cloakwall standalone proxy in a container. No LiteLLM, no other
+# packages: just Python and cloakwall.
+#
+#   docker build -t cloakwall-proxy -f examples/run/Dockerfile.proxy .
+#   docker run -d --name cloakwall --restart unless-stopped \
+#     -p 127.0.0.1:8787:8787 -e OPENAI_API_KEY -v cloakwall-audit:/data \
+#     cloakwall-proxy --upstream https://api.openai.com/v1 --upstream-key-env OPENAI_API_KEY --restore
+#
+# Inside the container the proxy must listen on 0.0.0.0 to be reachable;
+# publishing the port on 127.0.0.1 keeps it reachable from this machine only.
+FROM python:3.12-slim
+
+ARG CLOAKWALL_VERSION=0.3.1
+RUN pip install --no-cache-dir "cloakwall==${CLOAKWALL_VERSION}" \
+ && useradd -r -u 65532 -s /usr/sbin/nologin cloakwall \
+ && mkdir -p /data && chown cloakwall:cloakwall /data
+
+USER 65532:65532
+EXPOSE 8787
+VOLUME ["/data"]
+ENTRYPOINT ["cloakwall", "serve", "--host", "0.0.0.0", "--port", "8787", "--audit-path", "/data/audit.log"]
+CMD ["--upstream", "https://api.openai.com/v1"]
