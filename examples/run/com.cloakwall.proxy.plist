@@ -5,7 +5,7 @@
 
     pipx install cloakwall
     mkdir -p ~/.cloakwall ~/Library/LaunchAgents
-    cp cloakwall-macos.sh ~/.cloakwall/run.sh && chmod 700 ~/.cloakwall/run.sh
+    sed "s#__CLOAKWALL__#$(command -v cloakwall)#" cloakwall-macos.sh > ~/.cloakwall/run.sh && chmod 700 ~/.cloakwall/run.sh
     sed "s#__HOME__#$HOME#g" com.cloakwall.proxy.plist > ~/Library/LaunchAgents/com.cloakwall.proxy.plist
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cloakwall.proxy.plist
 -->
