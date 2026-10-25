@@ -50,6 +50,8 @@
   .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
   code, pre { font-family: Consolas, "SFMono-Regular", Menlo, monospace; }
   .install { max-width: 100%; min-width: 0; background: var(--code); border: 1px solid var(--edge); border-radius: 10px; padding: 11px 16px; font-size: 15px; overflow-x: auto; white-space: nowrap; }
+  p code { white-space: nowrap; }
+  .card .install { white-space: normal; display: inline-block; }
   .shot { margin: 44px 0 8px; }
   .shot img { width: 100%; height: auto; border-radius: 14px; border: 1px solid var(--edge); display: block; }
   section { padding: 56px 0; border-top: 1px solid var(--edge); }
@@ -89,8 +91,8 @@
       Cloakwall
     </a>
     <nav>
-      <a href="#how">How it works</a>
-      <a href="#coverage">Coverage</a>
+      <a href="#use">How to use</a>
+      <a href="#agents">For agents</a>
       <a href="#numbers">Benchmarks</a>
       <a href="#partners">Design partners</a>
     </nav>
@@ -99,13 +101,13 @@
 
 <main>
   <div class="wrap hero">
-    <div class="eyebrow">Open source · works fully offline</div>
+    <div class="eyebrow">Open source · zero dependencies · works fully offline</div>
     <h1>Stop your AI apps leaking personal data.</h1>
-    <p class="lede">Cloakwall removes personal and health data from every LLM request before it leaves your network, and keeps a tamper-evident audit log you can show your auditor.</p>
+    <p class="lede">Cloakwall removes personal data and secrets from AI requests before they leave your machine, can put the real values back into the reply, and keeps a tamper-evident audit log you can show your auditor. It works with any OpenAI-compatible app or agent.</p>
     <div class="cta">
       <a class="btn primary" href="https://github.com/Rishikesh-glitch/Cloakwall-v0.1">View on GitHub</a>
       <a class="btn" href="#partners">Become a design partner</a>
-      <code class="install">pip install "cloakwall[litellm]"</code>
+      <code class="install">pip install cloakwall</code>
     </div>
     <div class="shot">
       <img src="cloakwall-post-image.png" width="1200" height="675"
@@ -120,10 +122,36 @@
     </div>
   </section>
 
+  <section id="use">
+    <div class="wrap">
+      <h2>Three ways to use it</h2>
+      <p class="sub">Start by seeing what you would leak, then protect the traffic.</p>
+      <div class="grid">
+        <div class="card"><h3>1. Scan: see the risk</h3>
+          <p>Checks your files, <code>.env</code> secrets and chat logs, and reports what an AI tool could send out: how many emails, cards, API keys, and where. It never shows a value and never sends anything.</p>
+          <p style="margin-top:10px"><code class="install">cloakwall scan ./my-project</code></p></div>
+        <div class="card"><h3>2. Proxy: protect any app</h3>
+          <p>A local server any OpenAI-compatible app, SDK or agent points at. Requests are cleaned before they leave and forwarded to your provider. With <code>--restore</code>, the model only sees codes, and your app gets the real values back.</p>
+          <p style="margin-top:10px"><code class="install">cloakwall serve --restore</code></p></div>
+        <div class="card"><h3>3. LiteLLM plugin</h3>
+          <p>Already run a <a href="https://github.com/BerriAI/litellm">LiteLLM</a> gateway? Add Cloakwall as a guardrail with six lines of configuration.</p>
+          <p style="margin-top:10px"><code class="install">pip install "cloakwall[litellm]"</code></p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="agents">
+    <div class="wrap">
+      <h2>For AI coding agents</h2>
+      <p class="sub">Coding and agent tools read whole projects, <code>.env</code> files included, and send what they read to the model. Point them at <code>cloakwall serve --restore</code>: your API keys and customer data are replaced by codes before they leave your machine, and put back on your machine, so the agent still works.</p>
+      <p class="sub">Setup takes one setting in <strong>pi</strong> and <strong>oh-my-pi</strong> (a custom provider) or <strong>Hermes Agent</strong> (a custom endpoint). <a href="https://github.com/Rishikesh-glitch/Cloakwall-v0.1#agent-harnesses">Setup guide →</a></p>
+    </div>
+  </section>
+
   <section id="how">
     <div class="wrap">
       <h2>How it works</h2>
-      <p class="sub">Cloakwall is a guardrail for <a href="https://github.com/BerriAI/litellm">LiteLLM</a>, the open-source gateway many teams use to route AI traffic. Six lines of configuration and it runs inside the gateway you already have.</p>
+      <p class="sub">The same engine runs in all three: detect, check, replace, record.</p>
       <div class="grid">
         <div class="card"><h3>1. Detect</h3><p>Finds emails, card numbers, SSNs, IBANs, API keys, medical record and NHS numbers, phone numbers, IP addresses and dates of birth.</p></div>
         <div class="card"><h3>2. Check</h3><p>Validates each match: cards must pass the Luhn check, NHS numbers the mod-11 check. That keeps order numbers and phone numbers from being flagged by mistake.</p></div>
@@ -156,9 +184,9 @@
     <div class="wrap">
       <h2>Built for networks where data can't leave</h2>
       <div class="grid">
-        <div class="card"><h3>Runs in-process</h3><p>No sidecar containers, no external service, no AI model to download.</p></div>
+        <div class="card"><h3>Before it leaves, not after</h3><p>Some AI gateways redact on their own servers, after your data has already reached them. Cloakwall runs on your machine, so the sensitive values never leave it. No extra services, no AI model to download.</p></div>
         <div class="card"><h3>Works air-gapped</h3><p>The core is pure Python standard library and opens no network connections. Pair it with a local model and nothing leaves your network.</p></div>
-        <div class="card"><h3>Open source</h3><p>AGPL-3.0. Your security team can read every line before trusting it. A commercial licence is available for closed-source use.</p></div>
+        <div class="card"><h3>Nothing to hijack</h3><p>The proxy and scanner use only the Python standard library: zero third-party dependencies for a supply-chain attack to replace. Open source (AGPL-3.0), so your security team can read every line. A commercial licence is available for closed-source use.</p></div>
       </div>
     </div>
   </section>
@@ -187,7 +215,7 @@
       <div class="note">
         <strong>Cloakwall finds patterns, not meaning.</strong> It catches structured identifiers such as numbers, emails and keys, but not a person's name or a medical condition written in an ordinary sentence. If you need that, NLP tools such as Microsoft Presidio catch more, at the cost of extra services and no audit trail.
         <br><br>
-        <strong>It's early.</strong> Version 0.1, with 76 automated tests and checks against the real LiteLLM proxy, but not yet running in production anywhere. That's why we're looking for design partners.
+        <strong>It's early.</strong> Version 0.3, with 145 automated tests run on every change, and checked against the official OpenAI client and a real AI provider, but not yet running in production anywhere. That's why we're looking for design partners.
       </div>
     </div>
   </section>
