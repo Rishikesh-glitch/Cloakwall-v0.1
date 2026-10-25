@@ -85,7 +85,29 @@ DETECTORS: list[Detector] = [
     Detector("IBAN", re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b")),
     Detector("EMAIL", re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]{2,}\b"), gate=("@",)),
     Detector("AWS_KEY", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), gate=("AKIA", "ASIA")),
-    Detector("API_KEY", re.compile(r"\b(?:sk|pk|rk)[-_](?:live|test|proj)?[-_]?[A-Za-z0-9]{16,}\b")),
+    # Provider API keys. The body allows - and _ because real keys contain
+    # them (sk-proj-..., sk-ant-api03-...): stopping at the first dash would
+    # redact the head of a key and leave the tail in the prompt. The
+    # lookahead wants a digit or capital somewhere in the body, so
+    # hyphenated lower-case words that merely start with "sk-" are left alone.
+    Detector("API_KEY", re.compile(r"\b(?:sk|pk|rk)[-_](?=[A-Za-z0-9_-]*[0-9A-Z])[A-Za-z0-9_-]{16,}"),
+             gate=("sk-", "sk_", "pk-", "pk_", "rk-", "rk_")),
+    Detector("API_KEY", re.compile(r"\bAIza[0-9A-Za-z_-]{30,}"), gate=("AIza",)),        # Google / Gemini
+    Detector("API_KEY", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,})"),
+             gate=("ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_")),          # GitHub
+    Detector("API_KEY", re.compile(r"\bxox[abposr]-[A-Za-z0-9-]{10,}"), gate=("xox",)),  # Slack
+    Detector("API_KEY", re.compile(r"\bgsk_[A-Za-z0-9]{20,}"), gate=("gsk_",)),        # Groq
+    Detector("API_KEY", re.compile(r"\bhf_[A-Za-z0-9]{30,}"), gate=("hf_",)),          # Hugging Face
+    # A PEM private key: the whole block when it is all there. When the END
+    # line has not arrived (a stream, a truncated paste), the header plus the
+    # base64 lines that follow it, so the key body is never left behind.
+    Detector("PRIVATE_KEY", re.compile(
+        r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----"
+        r"(?:[\s\S]*?-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----|(?:\r?\n[A-Za-z0-9+/=]{16,})*)"),
+        gate=("-----BEGIN",)),
+    # Credentials in a connection string: postgres://user:secret@host. The
+    # user and password are replaced together; the host stays readable.
+    Detector("PASSWORD", re.compile(r"(?<=://)[^\s:/@]+:[^\s@/]+(?=@)"), gate=("://",)),
     Detector("BEARER", re.compile(r"\bey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"), gate=("ey",)),
     Detector("MRN", re.compile(r"\b(?:MRN|mrn)[:\s#]*([A-Z0-9]{6,12})\b"), gate=("MRN", "mrn")),
     Detector("NHS", re.compile(r"\b\d{3}[ -]?\d{3}[ -]?\d{4}\b"), _nhs),
@@ -101,7 +123,9 @@ DETECTORS: list[Detector] = [
 DEFAULT_ENTITIES = {d.name for d in DETECTORS}
 
 # Prefixes of key formats that may contain no digit at all.
-_KEY_PREFIXES = ("sk-", "sk_", "pk-", "pk_", "rk-", "rk_", "AKIA", "ASIA", "eyJ")
+_KEY_PREFIXES = ("sk-", "sk_", "pk-", "pk_", "rk-", "rk_", "AKIA", "ASIA", "eyJ",
+                 "AIza", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "xox",
+                 "gsk_", "hf_", "-----BEGIN")
 
 
 @dataclass
