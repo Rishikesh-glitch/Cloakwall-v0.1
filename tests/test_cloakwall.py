@@ -55,6 +55,54 @@ check("letters-only AWS key", r.redact("id AKIAABCDEFGHIJKLMNOP").text, "id <AWS
 check("letters-only JWT", r.redact("t eyJhbGciOiJIUzI.eyJzdWIiOiJhYmMifQ.SflKxwRJSMeKKF").text,
       "t <BEARER>")
 
+section("Secrets and API keys")
+# Made-up keys in each provider's public format. The whole key must go:
+# redacting the head of a key and leaving the tail is still a leak.
+#
+# Each key is assembled from pieces at run time so that no complete
+# key-shaped string appears in the source: secret scanners (GitHub push
+# protection among them) rightly refuse a push that contains one.
+def fake(*parts):
+    return "".join(parts)
+
+
+BODY = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2W3x4Y5z6"
+KEYS = {
+    "OpenAI, - and _ inside": fake("sk-", "proj-", "AbCdEfGhIjKlMnOpQr-StUv_wxYZ1234abcd"),
+    "Stripe": fake("sk_", "live_", BODY[:24]),
+    "Anthropic": fake("sk-", "ant-", "api03-", BODY[:28], "-AbCd"),
+    "Google / Gemini": fake("AI", "za", "Sy", BODY[:20], "-", BODY[20:32]),
+    "GitHub classic": fake("gh", "p_", BODY[:36]),
+    "GitHub fine-grained": fake("github", "_pat_", "11", BODY[:20], "_", BODY[20:52]),
+    "Slack": fake("xo", "xb-", "123456789012-", "1234567890123-", BODY[:24]),
+    "Groq": fake("gs", "k_", BODY[:40]),
+    "Hugging Face": fake("h", "f_", BODY[:34]),
+}
+for name, key in KEYS.items():
+    check(f"whole key redacted: {name}", r.redact(f"KEY={key} end").text, "KEY=<API_KEY> end")
+
+PEM = ("-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA1b2C3d4E5f6G7h8I9j0K1l2M3n4\n"
+       "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdef\n-----END RSA PRIVATE KEY-----")
+check("private key block", r.redact("key:\n" + PEM + "\nthanks").text, "key:\n<PRIVATE_KEY>\nthanks")
+check("truncated private key: body still removed",
+      r.redact("key:\n" + PEM.split("-----END")[0] + "thanks").text, "key:\n<PRIVATE_KEY>\nthanks")
+check("connection-string password",
+      r.redact("postgres://admin:S3cretPass@db.internal:5432/app").text,
+      "postgres://<PASSWORD>@db.internal:5432/app")
+
+from cloakwall.redact import StreamRedactor
+sr = StreamRedactor(r, holdback=64)
+streamed = "".join(sr.feed(c).text for c in
+                   [("here:\n" + PEM + "\nok " + "x " * 40)[i:i + 7]
+                    for i in range(0, len(PEM) + 100, 7)]) + sr.flush().text
+check("private key streamed in 7-char chunks never leaks",
+      ("MIIEpA" in streamed, "AbCdEf" in streamed, "<PRIVATE_KEY>" in streamed), (False, False, True))
+
+for text in ["use sk-learn-compatible-estimator here", "pip install scikit-learn",
+             "visit https://example.com/path", "the hf_hub module", "xoxo hugs",
+             "-----BEGIN PUBLIC KEY-----", "the AIza prefix is how Google keys start"]:
+    check(f"no false alarm: {text!r}", r.redact(text).text, text)
+
 # ---------------------------------------------------------------- validators
 section("Validators")
 check("luhn accepts real card", _luhn("4111111111111111"), True)
