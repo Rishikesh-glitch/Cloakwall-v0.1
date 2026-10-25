@@ -8,24 +8,47 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    # bash on every OS (Git Bash on Windows), with -e: a failing test file
+    # fails the step. PowerShell would only check the last command's status.
+    shell: bash
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.os }}, ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.10", "3.11", "3.12", "3.13"]
+        include:
+          # Every supported Python on Linux, where production runs...
+          - { os: ubuntu-latest, python: "3.10" }
+          - { os: ubuntu-latest, python: "3.11" }
+          - { os: ubuntu-latest, python: "3.12" }
+          - { os: ubuntu-latest, python: "3.13" }
+          # ...and the oldest and newest on macOS and Windows, where
+          # developers run the scanner and the local proxy.
+          - { os: macos-latest, python: "3.10" }
+          - { os: macos-latest, python: "3.13" }
+          - { os: windows-latest, python: "3.10" }
+          - { os: windows-latest, python: "3.13" }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      # The core suite needs nothing but the standard library.
+      # The suites need nothing but the standard library.
       - name: Run tests
         run: |
           python tests/test_cloakwall.py
           python tests/test_proxy.py
           python tests/test_scan.py
+      - name: Command line works when installed
+        run: |
+          python -m pip install .
+          cloakwall --version
+          echo "mail a@b.com" | cloakwall scan - || test $? -eq 1
       - name: Run benchmarks (smoke check)
         run: python benchmarks/bench.py
 
