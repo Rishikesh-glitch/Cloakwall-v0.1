@@ -163,6 +163,29 @@ docker run -p 4000:4000 \
 Run it on Linux in production. The audit log fsyncs every entry; that costs
 about 0.3 ms on Linux and about 100 ms on Windows (see Benchmarks).
 
+## What it detects
+
+**Personal and health data:** email addresses, credit cards (Luhn-validated),
+SSNs, IBANs, medical record numbers, NHS numbers (modulus-11 validated),
+phone numbers including international formats, IPv4 addresses and dates of
+birth.
+
+**Secrets:** API keys from OpenAI, Anthropic, Stripe, Google / Gemini,
+GitHub, Slack, Groq and Hugging Face, AWS access keys, JWTs and bearer
+tokens, PEM private keys (the whole block, even when it arrives in pieces
+over a stream), and the credentials in connection strings
+(`postgres://user:password@host` becomes `postgres://<PASSWORD>@host`).
+The whole key is always replaced: real keys contain `-` and `_`, and a
+redactor that stops at the first one leaves the tail of the key in the prompt.
+
+The validators matter more than the patterns. Without a Luhn check every
+16-digit order number gets flagged; without the NHS checksum every US phone
+number gets labelled a health identifier. Both are the reason teams turn
+regex redaction off after a week.
+
+Missing a format you use? Open an issue with its *shape* (prefix and
+length), never a real key.
+
 ## Where it looks
 
 Every request field that can carry text, on every endpoint. The proxy and
@@ -265,7 +288,7 @@ entry, about 1.8 ms.
 ## Tests
 
 ```bash
-python3 tests/test_cloakwall.py     # 81 tests, no pytest required
+python3 tests/test_cloakwall.py     # 101 tests, no pytest required
 python3 tests/test_proxy.py         # 42 proxy tests, fake upstream included
 python3 tests/test_scan.py          # 22 scanner tests
 ```

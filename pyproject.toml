@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cloakwall"
-version = "0.3.0"
+version = "0.3.1"
 description = "PII/PHI redaction and tamper-evident audit logging for LLM traffic: a local scanner, a standalone OpenAI-compatible proxy, or a LiteLLM guardrail. Works air-gapped."
 readme = "README.md"
 license = "AGPL-3.0-only"
