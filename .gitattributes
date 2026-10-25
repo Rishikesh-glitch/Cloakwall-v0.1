@@ -1,0 +1,4 @@
+# Scripts and unit files must keep Unix line endings to run on Linux and macOS.
+*.sh      text eol=lf
+*.service text eol=lf
+*.plist   text eol=lf
