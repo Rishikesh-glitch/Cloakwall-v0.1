@@ -153,7 +153,7 @@
       <h2>How it works</h2>
       <p class="sub">The same engine runs in all three: detect, check, replace, record.</p>
       <div class="grid">
-        <div class="card"><h3>1. Detect</h3><p>Finds emails, card numbers, SSNs, IBANs, API keys, medical record and NHS numbers, phone numbers, IP addresses and dates of birth.</p></div>
+        <div class="card"><h3>1. Detect</h3><p>Finds emails, card numbers, SSNs, IBANs, medical record and NHS numbers, phone numbers, IP addresses and dates of birth, plus secrets: API keys from OpenAI, Anthropic, Google, GitHub, Slack, Stripe and more, AWS keys, private keys and database passwords.</p></div>
         <div class="card"><h3>2. Check</h3><p>Validates each match: cards must pass the Luhn check, NHS numbers the mod-11 check. That keeps order numbers and phone numbers from being flagged by mistake.</p></div>
         <div class="card"><h3>3. Replace</h3><p>Swaps the value for a label (&lt;EMAIL&gt;), a consistent code (&lt;EMAIL:7f3a91c2&gt;) or the last four digits (&lt;CARD:****1111&gt;), so the AI can still help.</p></div>
         <div class="card"><h3>4. Record</h3><p>Writes a hash-chained audit entry: what type was found and how many, never the value. Edited, deleted or truncated entries are detectable. Exports to Splunk, Datadog or Elastic.</p></div>
@@ -215,7 +215,7 @@
       <div class="note">
         <strong>Cloakwall finds patterns, not meaning.</strong> It catches structured identifiers such as numbers, emails and keys, but not a person's name or a medical condition written in an ordinary sentence. If you need that, NLP tools such as Microsoft Presidio catch more, at the cost of extra services and no audit trail.
         <br><br>
-        <strong>It's early.</strong> Version 0.3, with 145 automated tests run on every change, and checked against the official OpenAI client and a real AI provider, but not yet running in production anywhere. That's why we're looking for design partners.
+        <strong>It's early.</strong> Version 0.3, with 165 automated tests run on every change, and checked against the official OpenAI client and a real AI provider, but not yet running in production anywhere. That's why we're looking for design partners.
       </div>
     </div>
   </section>
