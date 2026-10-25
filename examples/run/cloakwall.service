@@ -1,0 +1,27 @@
+# Cloakwall proxy as a systemd user service (Linux).
+#
+# Starts at login, restarts if it stops. Install:
+#
+#   pipx install cloakwall            # or: pip install --user cloakwall
+#   mkdir -p ~/.config/cloakwall ~/.config/systemd/user
+#   printf 'CLOAKWALL_UPSTREAM=https://api.openai.com/v1\nOPENAI_API_KEY=sk-...\n' > ~/.config/cloakwall/env
+#   chmod 600 ~/.config/cloakwall/env
+#   cp cloakwall.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now cloakwall
+#
+# The key lives in ~/.config/cloakwall/env (readable by you only), not in
+# this file and not on a command line.
+
+[Unit]
+Description=Cloakwall redaction proxy
+After=network-online.target
+
+[Service]
+EnvironmentFile=%h/.config/cloakwall/env
+ExecStart=%h/.local/bin/cloakwall serve --upstream ${CLOAKWALL_UPSTREAM} --upstream-key-env OPENAI_API_KEY --restore --audit-path %h/.local/share/cloakwall/audit.log
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
