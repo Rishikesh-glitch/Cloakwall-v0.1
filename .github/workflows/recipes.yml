@@ -28,7 +28,8 @@ jobs:
           mkdir -p ~/.config/cloakwall ~/.config/systemd/user
           printf 'CLOAKWALL_UPSTREAM=https://api.openai.com/v1\nOPENAI_API_KEY=sk-ci-dummy\n' > ~/.config/cloakwall/env
           chmod 600 ~/.config/cloakwall/env
-          cp examples/run/cloakwall.service ~/.config/systemd/user/
+          sed "s#__CLOAKWALL__#$(command -v cloakwall)#" examples/run/cloakwall.service > ~/.config/systemd/user/cloakwall.service
+          grep ExecStart ~/.config/systemd/user/cloakwall.service
           sudo loginctl enable-linger "$USER"
           export XDG_RUNTIME_DIR=/run/user/$(id -u)
           for i in $(seq 1 30); do [ -S "$XDG_RUNTIME_DIR/bus" ] && break; sleep 1; done
@@ -37,7 +38,10 @@ jobs:
       - name: Proxy answers
         run: |
           for i in $(seq 1 30); do curl -sf http://127.0.0.1:8787/cloakwall/health && exit 0; sleep 1; done
-          XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user status cloakwall --no-pager; exit 1
+          export XDG_RUNTIME_DIR=/run/user/$(id -u)
+          systemctl --user status cloakwall --no-pager || true
+          journalctl --user -u cloakwall --no-pager -n 50 || true
+          exit 1
 
   docker:
     runs-on: ubuntu-latest
@@ -72,7 +76,8 @@ jobs:
           security add-generic-password -s cloakwall-upstream -a "$USER" -w sk-ci-dummy ci.keychain
           plutil -lint examples/run/com.cloakwall.proxy.plist
           mkdir -p ~/.cloakwall ~/Library/LaunchAgents
-          cp examples/run/cloakwall-macos.sh ~/.cloakwall/run.sh && chmod 700 ~/.cloakwall/run.sh
+          sed "s#__CLOAKWALL__#$(command -v cloakwall)#" examples/run/cloakwall-macos.sh > ~/.cloakwall/run.sh && chmod 700 ~/.cloakwall/run.sh
+          grep 'exec ' ~/.cloakwall/run.sh
           sed "s#__HOME__#$HOME#g" examples/run/com.cloakwall.proxy.plist > ~/Library/LaunchAgents/com.cloakwall.proxy.plist
           launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cloakwall.proxy.plist
       - name: Proxy answers

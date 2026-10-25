@@ -6,12 +6,13 @@
 #   mkdir -p ~/.config/cloakwall ~/.config/systemd/user
 #   printf 'CLOAKWALL_UPSTREAM=https://api.openai.com/v1\nOPENAI_API_KEY=sk-...\n' > ~/.config/cloakwall/env
 #   chmod 600 ~/.config/cloakwall/env
-#   cp cloakwall.service ~/.config/systemd/user/
+#   sed "s#__CLOAKWALL__#$(command -v cloakwall)#" cloakwall.service > ~/.config/systemd/user/cloakwall.service
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now cloakwall
 #
 # The key lives in ~/.config/cloakwall/env (readable by you only), not in
-# this file and not on a command line.
+# this file and not on a command line. __CLOAKWALL__ becomes the path of the
+# installed command, wherever pip or pipx put it.
 
 [Unit]
 Description=Cloakwall redaction proxy
@@ -19,7 +20,7 @@ After=network-online.target
 
 [Service]
 EnvironmentFile=%h/.config/cloakwall/env
-ExecStart=%h/.local/bin/cloakwall serve --upstream ${CLOAKWALL_UPSTREAM} --upstream-key-env OPENAI_API_KEY --restore --audit-path %h/.local/share/cloakwall/audit.log
+ExecStart=__CLOAKWALL__ serve --upstream ${CLOAKWALL_UPSTREAM} --upstream-key-env OPENAI_API_KEY --restore --audit-path %h/.local/share/cloakwall/audit.log
 Restart=on-failure
 RestartSec=2
 
