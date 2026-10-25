@@ -59,6 +59,26 @@ jobs:
           curl -sf http://127.0.0.1:8787/cloakwall/health | grep -q '"restore": true'
           test "$(docker exec cloakwall id -u)" = 65532
 
+  codespace-devcontainer:
+    # The Dev Containers CLI is the reference implementation of the spec
+    # Codespaces builds from: same image, same lifecycle commands, same env.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the dev container from examples/run/devcontainer.json
+        run: |
+          mkdir -p .devcontainer && cp examples/run/devcontainer.json .devcontainer/devcontainer.json
+          npm install -g @devcontainers/cli
+          # In a Codespace, a secret named OPENAI_API_KEY arrives as an env var.
+          devcontainer up --workspace-folder . --remote-env OPENAI_API_KEY=sk-ci-dummy
+      - name: Proxy is running inside, and OPENAI_BASE_URL points at it
+        run: |
+          devcontainer exec --workspace-folder . bash -c '
+            echo "OPENAI_BASE_URL=$OPENAI_BASE_URL"
+            test "$OPENAI_BASE_URL" = "http://127.0.0.1:8787/v1"
+            for i in $(seq 1 30); do curl -sf http://127.0.0.1:8787/cloakwall/health && exit 0; sleep 1; done
+            echo "--- /tmp/cloakwall.log"; cat /tmp/cloakwall.log; ps aux | grep -i [c]loakwall; exit 1'
+
   macos-launchd:
     runs-on: macos-latest
     steps:
