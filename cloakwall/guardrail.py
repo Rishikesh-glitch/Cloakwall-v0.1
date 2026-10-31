@@ -37,6 +37,8 @@ Config (litellm config.yaml):
           redaction_mode: mask          # mask | hash | partial
           redact_output: true           # also mask PII in model responses
           audit_path: /var/log/cloakwall/audit.log
+          audit_hmac_key_env: CLOAKWALL_AUDIT_KEY
+          strict_cards: true
           fail_closed: true
 
 Everything runs in-process. No sidecar, no external endpoint, no model
@@ -69,17 +71,24 @@ class Cloakwall(CustomGuardrail):
                  redaction_mode: str = "mask",
                  entities: Optional[list] = None,
                  audit_path: str = "./cloakwall-audit.log",
+                 audit_hmac_key_env: Optional[str] = None,
+                 strict_cards: bool = False,
                  fail_closed: bool = True,
                  anchor_every: int = 100,
                  block_on: Optional[list] = None,
                  redact_output: bool = False,
                  stream_holdback: int = 64,
                  **kwargs):
+        audit_key = os.environ.get(audit_hmac_key_env) if audit_hmac_key_env else None
+        if audit_hmac_key_env and not audit_key:
+            raise ValueError(f"environment variable {audit_hmac_key_env} is not set")
         self.redactor = Redactor(
             mode=redaction_mode,
             entities=set(entities) if entities else None,
+            strict_cards=strict_cards,
         )
-        self.audit = AuditLog(audit_path)
+        self.audit = AuditLog(audit_path,
+                              hmac_key=audit_key.encode() if audit_key is not None else None)
         self.siem = SIEMExporter.from_env()
         # fail_closed decides what happens if redaction itself throws. In a
         # regulated deployment the safe answer is to reject the request rather
@@ -125,6 +134,8 @@ class Cloakwall(CustomGuardrail):
         self.requests += 1
         present = [f for f in REQUEST_FIELDS if data.get(f) is not None]
         if not present:
+            self._record("cloakwall.request", model=data.get("model"), total=0,
+                         entities={})
             return data
 
         try:
@@ -142,6 +153,8 @@ class Cloakwall(CustomGuardrail):
             return data
 
         hits = {r.entity for r in redactions}
+        self._record("cloakwall.request", model=data.get("model"),
+                     entities=_counts(redactions), total=len(redactions))
         blocked = hits & self.block_on
         if blocked:
             self.blocked += 1
