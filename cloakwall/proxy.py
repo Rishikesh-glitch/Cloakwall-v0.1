@@ -35,6 +35,7 @@ import hashlib
 import hmac
 import json
 import re
+import sys
 import threading
 import urllib.error
 import urllib.request
@@ -74,6 +75,7 @@ class _Vault(Redactor):
         self.entities = base.entities
         self.secret = base.secret
         self.detectors = base.detectors
+        self.strict_cards = base.strict_cards
         self._gate = base._gate
         self.values: dict[str, str] = {}
 
@@ -295,7 +297,9 @@ class CloakwallProxy:
                  block_on: Optional[list] = None, redact_output: bool = False,
                  restore: bool = False, upstream_key: Optional[str] = None,
                  timeout: float = 600.0, max_body: int = 10 * 1024 * 1024,
-                 stream_holdback: int = 64, fail_closed: bool = True):
+                 stream_holdback: int = 64, fail_closed: bool = True,
+                 audit_hmac_key: bytes | None = None, strict_cards: bool = False,
+                 anchor_every: int = 100):
         if redact_output and restore:
             raise ValueError("redact_output and restore are opposites: redact_output hides "
                              "PII from the caller, restore gives it back. Choose one.")
@@ -305,7 +309,8 @@ class CloakwallProxy:
         self.upstream = upstream.rstrip("/")
         self.upstream_key = upstream_key
         self.redactor = Redactor(mode=redaction_mode,
-                                 entities=set(entities) if entities else None)
+                                 entities=set(entities) if entities else None,
+                                 strict_cards=strict_cards)
         self.block_on = set(block_on or [])
         self.redact_output = redact_output
         self.restore = restore
@@ -313,8 +318,9 @@ class CloakwallProxy:
         self.max_body = max_body
         self.stream_holdback = stream_holdback
         self.fail_closed = fail_closed
-        self.audit = AuditLog(audit_path)
+        self.audit = AuditLog(audit_path, hmac_key=audit_hmac_key)
         self.siem = SIEMExporter.from_env()
+        self.anchor_every = max(1, int(anchor_every))
         self._lock = threading.Lock()
         self.counters = {"requests": 0, "requests_with_redactions": 0, "requests_blocked": 0,
                          "responses_with_redactions": 0, "responses_restored": 0,
@@ -340,6 +346,14 @@ class CloakwallProxy:
     def record(self, event: str, **fields) -> None:
         entry = self.audit.append(event, **fields)
         self.siem.send(entry)
+        if self.siem.enabled and entry["seq"] % self.anchor_every == 0:
+            self.siem.send({
+                "event": "cloakwall.anchor",
+                "seq": entry["seq"],
+                "hash": entry["hash"],
+                "ts": entry["ts"],
+                "host": entry["host"],
+            })
 
     def serve_forever(self) -> None:
         self.httpd.serve_forever()
@@ -389,6 +403,17 @@ class _Handler(BaseHTTPRequestHandler):
     def _error(self, status: int, message: str, kind: str) -> None:
         self._send_json(status, {"error": {"message": message, "type": kind, "code": kind}})
 
+    def _record(self, event: str, *, after_upstream: bool = False, **fields) -> bool:
+        try:
+            self.proxy.record(event, **fields)
+            return True
+        except OSError:
+            message = ("audit write failed after upstream call; response not delivered"
+                       if after_upstream else
+                       "audit write failed; request not forwarded")
+            self._error(503, message, "audit_unavailable")
+            return False
+
     # -------------------------------------------------------------- upstream
     def _upstream_url(self) -> str:
         path = self.path
@@ -418,6 +443,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _relay_error(self, exc: urllib.error.HTTPError) -> None:
         self.proxy.count("upstream_errors")
+        if not self._record("cloakwall.response", after_upstream=True,
+                            status=exc.code, stream=False):
+            return
         body = exc.read()
         self.send_response(exc.code)
         self.send_header("Content-Type", exc.headers.get("Content-Type", "application/json"))
@@ -430,9 +458,15 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path == "/cloakwall/health":
             self._send_json(200, {"status": "ok", **self.proxy.stats()})
             return
+        if not self._record("cloakwall.request", method="GET", path=self.path,
+                            entities={}, total=0):
+            return
         try:
             with self._open_upstream("GET", None) as resp:
                 body = resp.read()
+                if not self._record("cloakwall.response", after_upstream=True,
+                                    status=resp.status, stream=False):
+                    return
                 self.send_response(resp.status)
                 self.send_header("Content-Type", resp.headers.get("Content-Type", "application/json"))
                 self.send_header("Content-Length", str(len(body)))
@@ -474,26 +508,33 @@ class _Handler(BaseHTTPRequestHandler):
                     data[f], r = redactor.redact_value(data[f])
                 redactions.extend(r)
         except Exception as exc:
-            p.record("cloakwall.error", stage="request", error=exc.__class__.__name__)
+            if not self._record("cloakwall.error", stage="request",
+                                error=exc.__class__.__name__):
+                return
             if p.fail_closed:
                 self._error(500, "redaction failed; request not forwarded", "cloakwall_error")
                 return
             redactions = []
 
         model = data.get("model")
+        if not self._record("cloakwall.request", method="POST", model=model, path=self.path,
+                            entities=_counts(redactions), total=len(redactions)):
+            return
         blocked = {r.entity for r in redactions} & p.block_on
         if blocked:
             p.count("requests_blocked")
-            p.record("cloakwall.blocked", model=model, path=self.path,
-                     entities=_counts(redactions), blocked_on=sorted(blocked))
+            if not self._record("cloakwall.blocked", model=model, path=self.path,
+                                entities=_counts(redactions), blocked_on=sorted(blocked)):
+                return
             self._error(400, "Cloakwall blocked this request: "
                              f"{', '.join(sorted(blocked))} present", "cloakwall_blocked")
             return
         if redactions:
             p.count("requests_with_redactions")
-            p.record("cloakwall.redacted", model=model, path=self.path,
-                     entities=_counts(redactions), total=len(redactions),
-                     mode="restore" if p.restore else p.redactor.mode)
+            if not self._record("cloakwall.redacted", model=model, path=self.path,
+                                entities=_counts(redactions), total=len(redactions),
+                                mode="restore" if p.restore else p.redactor.mode):
+                return
 
         out = None
         if p.redact_output:
@@ -533,15 +574,21 @@ class _Handler(BaseHTTPRequestHandler):
                 body = json.dumps(out.walk(json.loads(body))).encode()
             except ValueError:
                 pass        # not JSON: nothing we know how to process
-            self._record_output(out, model, stream=False)
+            if not self._record_output(out, model, stream=False):
+                return
+        if not self._record("cloakwall.response", after_upstream=True,
+                            model=model, status=resp.status, stream=False):
+            return
         self.send_response(resp.status)
         self.send_header("Content-Type", resp.headers.get("Content-Type", "application/json"))
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
-        self.proxy.record("cloakwall.response", model=model, status=resp.status, stream=False)
 
     def _stream(self, resp, out: Optional[_Output], model) -> None:
+        if not self._record("cloakwall.response_started", after_upstream=True,
+                            model=model, status=resp.status, stream=True):
+            return
         self.send_response(resp.status)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -586,16 +633,44 @@ class _Handler(BaseHTTPRequestHandler):
         finally:
             if out is not None:
                 self._record_output(out, model, stream=True)
-            self.proxy.record("cloakwall.response", model=model, status=resp.status, stream=True)
+            try:
+                self.proxy.record("cloakwall.response", model=model,
+                                  status=resp.status, stream=True)
+            except OSError:
+                print("cloakwall: audit write failed after streaming response",
+                      file=sys.stderr)
 
-    def _record_output(self, out: _Output, model, stream: bool) -> None:
+    def _record_output(self, out: _Output, model, stream: bool) -> bool:
         p = self.proxy
         if out.kind == "redact" and out.redactions:
             p.count("responses_with_redactions")
-            p.record("cloakwall.redacted_output", model=model, stream=stream,
-                     entities=_counts(out.redactions), total=len(out.redactions),
-                     mode=p.redactor.mode)
+            fields = {
+                "model": model, "stream": stream,
+                "entities": _counts(out.redactions), "total": len(out.redactions),
+                "mode": p.redactor.mode,
+            }
+            if stream:
+                try:
+                    p.record("cloakwall.redacted_output", **fields)
+                    return True
+                except OSError:
+                    print("cloakwall: audit write failed after streaming response",
+                          file=sys.stderr)
+                    return False
+            return self._record("cloakwall.redacted_output", after_upstream=True,
+                                **fields)
         elif out.kind == "restore" and out.restored:
             p.count("responses_restored")
             # How many tokens were put back -- never which values.
-            p.record("cloakwall.restored", model=model, stream=stream, total=out.restored)
+            if stream:
+                try:
+                    p.record("cloakwall.restored", model=model, stream=True,
+                             total=out.restored)
+                    return True
+                except OSError:
+                    print("cloakwall: audit write failed after streaming response",
+                          file=sys.stderr)
+                    return False
+            return self._record("cloakwall.restored", after_upstream=True,
+                                model=model, stream=stream, total=out.restored)
+        return True

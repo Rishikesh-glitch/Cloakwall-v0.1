@@ -5,8 +5,9 @@ What a compliance officer asks for after an incident is not "were you
 redacting" but "prove what happened on 14 March and prove the record has not
 been edited since". A plain log file cannot answer the second half.
 
-Every entry commits to the SHA-256 of the entry before it, so rewriting any
-line breaks the chain from that point on and `verify()` names the line.
+Every entry commits to the previous entry with SHA-256 by default, or HMAC-SHA-
+256 when an operator key is configured. `verify()` identifies the first
+invalid entry.
 
 A bare hash chain does not survive truncation, though: a prefix of a valid
 chain is itself a valid chain, so dropping the last N entries verifies
@@ -21,10 +22,10 @@ clean. Two things close that gap.
      how many entries there should be.
 
 The anchor is only as good as its separation from the log. On the same
-filesystem it stops accidental truncation and a careless attacker; pushed to
-a SIEM under different access control, it stops a determined one. That trust
-boundary is the operator's to choose, so both are supported and neither is
-claimed to be the other.
+filesystem it detects accidental truncation and edits to the log alone; it is
+not independent against an attacker who can rewrite both files. A checkpoint
+retained by a SIEM under different access control can provide that separate
+trust boundary, if the operator confirms it was durably stored.
 
 The log never stores the values that were redacted. It stores what kind of
 entity was found and how many -- enough to prove the control was working,
@@ -34,6 +35,7 @@ without becoming a second copy of the data you were protecting.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import socket
@@ -47,10 +49,20 @@ GENESIS = "0" * 64
 
 
 class AuditLog:
-    def __init__(self, path: str = "./cloakwall-audit.log"):
+    def __init__(self, path: str = "./cloakwall-audit.log",
+                 hmac_key: bytes | None = None):
+        if hmac_key == b"":
+            raise ValueError("audit HMAC key must not be empty")
         self.path = path
+        self.hmac_key = hmac_key
         self._lock = threading.Lock()   # hooks run concurrently under uvicorn
         os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+
+    def _digest(self, prev: str, body: str) -> str:
+        message = (prev + body).encode()
+        if self.hmac_key is not None:
+            return hmac.new(self.hmac_key, message, hashlib.sha256).hexdigest()
+        return hashlib.sha256(message).hexdigest()
 
     @property
     def anchor_path(self) -> str:
@@ -101,10 +113,13 @@ class AuditLog:
         try:
             with open(self.anchor_path) as fh:
                 return json.load(fh)
-        except (OSError, ValueError):
+        except FileNotFoundError:
             return None
 
     def append(self, event: str, **fields) -> dict:
+        reserved = {"ts", "seq", "event", "host", "prev", "hash_alg", "hash"}
+        if reserved.intersection(fields):
+            raise ValueError("audit fields cannot override reserved entry fields")
         with self._lock:
             prev_seq, prev = self._last()
             entry = {
@@ -113,10 +128,11 @@ class AuditLog:
                 "event": event,
                 "host": socket.gethostname(),
                 "prev": prev,
+                "hash_alg": "hmac-sha256" if self.hmac_key is not None else "sha256",
                 **fields,
             }
             body = json.dumps(entry, sort_keys=True)
-            entry["hash"] = hashlib.sha256((prev + body).encode()).hexdigest()
+            entry["hash"] = self._digest(prev, body)
             with open(self.path, "a") as fh:
                 fh.write(json.dumps(entry, sort_keys=True) + "\n")
                 fh.flush()
@@ -128,9 +144,32 @@ class AuditLog:
         """Verify the chain, and if an anchor is available, verify the log has
         not been truncated. Pass an anchor retrieved from your SIEM to check
         against a copy the log's own filesystem cannot reach."""
+        try:
+            a = anchor if anchor is not None else self.read_anchor()
+        except (OSError, ValueError) as exc:
+            return False, f"cannot read anchor: {exc}"
+        if a is not None:
+            if not isinstance(a, dict):
+                return False, "invalid anchor: expected a JSON object"
+            try:
+                anchor_seq = int(a["seq"])
+                anchor_hash = a["hash"]
+            except (KeyError, TypeError, ValueError):
+                return False, "invalid anchor: expected seq and hash fields"
+            if (anchor_seq < 0 or not isinstance(anchor_hash, str)
+                    or len(anchor_hash) != 64
+                    or any(char not in "0123456789abcdef" for char in anchor_hash)):
+                return False, "invalid anchor: seq or hash is malformed"
+        else:
+            anchor_seq = None
+            anchor_hash = None
         if not os.path.exists(self.path):
+            if a and anchor_seq > 0:
+                return False, (f"truncated: anchor records {anchor_seq} entries, "
+                               "log holds 0")
             return True, "no audit log yet"
 
+        hash_at_anchor = GENESIS if anchor_seq == 0 else None
         prev = GENESIS
         expected_seq = 0
         last_hash = GENESIS
@@ -138,27 +177,43 @@ class AuditLog:
             for n, line in enumerate(fh, 1):
                 if not line.strip():
                     continue
-                e = json.loads(line)
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    return False, f"line {n}: invalid JSON"
+                if not isinstance(e, dict):
+                    return False, f"line {n}: entry must be a JSON object"
                 claimed = e.pop("hash", None)
+                algorithm = e.get("hash_alg", "sha256")
+                if algorithm == "hmac-sha256" and self.hmac_key is None:
+                    return False, "HMAC key required to verify this audit log"
+                if algorithm == "sha256" and self.hmac_key is not None:
+                    return False, "audit log is not keyed with HMAC"
+                if algorithm not in ("sha256", "hmac-sha256"):
+                    return False, f"line {n}: unsupported hash algorithm {algorithm!r}"
                 if e.get("prev") != prev:
                     return False, f"line {n}: chain break"
                 expected_seq += 1
-                if int(e.get("seq", -1)) != expected_seq:
+                try:
+                    seq = int(e.get("seq", -1))
+                except (TypeError, ValueError):
+                    return False, f"line {n}: invalid sequence number"
+                if seq != expected_seq:
                     return False, (f"line {n}: sequence gap "
-                                   f"(expected {expected_seq}, found {e.get('seq')})")
-                recomputed = hashlib.sha256(
-                    (prev + json.dumps(e, sort_keys=True)).encode()).hexdigest()
+                                   f"(expected {expected_seq}, found {seq})")
+                recomputed = self._digest(prev, json.dumps(e, sort_keys=True))
                 if recomputed != claimed:
                     return False, f"line {n}: entry altered after writing"
                 prev = last_hash = claimed
+                if expected_seq == anchor_seq:
+                    hash_at_anchor = claimed
 
-        a = anchor if anchor is not None else self.read_anchor()
         if a:
-            if expected_seq < int(a.get("seq", 0)):
+            if expected_seq < anchor_seq:
                 return False, (f"truncated: anchor records {a['seq']} entries, "
                                f"log holds {expected_seq}")
-            if expected_seq == int(a.get("seq", 0)) and last_hash != a.get("hash"):
-                return False, "head does not match anchor"
+            if hash_at_anchor != anchor_hash:
+                return False, f"chain does not match anchor at sequence {anchor_seq}"
             return True, f"chain intact, {expected_seq} entries, anchor matches"
         return True, f"chain intact, {expected_seq} entries (no anchor to check truncation)"
 

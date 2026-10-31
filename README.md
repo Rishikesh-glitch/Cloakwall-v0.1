@@ -2,8 +2,9 @@
 
 PII/PHI redaction and tamper-evident audit logging for LLM traffic. It
 strips emails, card numbers, SSNs, medical record numbers, API keys and more
-from requests **before they leave your machine**, and records every
-redaction in a hash-chained audit log that shows if anyone edits it.
+from requests **before they leave your machine**, and records activity in a
+hash-chained audit log that can reveal edits when verified against a trusted
+key or checkpoint.
 
 No sidecar, no external service, no model download, no third-party
 dependencies. It runs unchanged in an air-gapped network.
@@ -72,7 +73,9 @@ token, split across chunks is still caught whole. Tool-call arguments are
 restored as valid JSON.
 
 Other options: `--block-on CARD SSN` rejects requests containing those
-entities instead of redacting them. `--entities` limits what is detected.
+entities instead of redacting them. `--strict-cards` also redacts card-shaped
+numbers that fail Luhn validation, which reduces missed typos at the cost of
+false positives. `--entities` limits what is detected.
 `--audit-path` sets the log file, and `cloakwall verify <log>` checks it.
 
 If you omit `--upstream-key-env`, the caller's `Authorization` header is
@@ -198,7 +201,8 @@ existing ingress or gateway for TLS and access control.
 LiteLLM's open-source guardrail framework supports custom guardrails plus
 Presidio, but Presidio means deploying and maintaining two extra containers,
 and audit logs, SIEM export and SSO sit behind the Enterprise licence.
-Cloakwall adds redaction and a compliance-grade audit trail as one plugin.
+Cloakwall adds redaction and a configurable, tamper-evident audit trail as
+one plugin.
 
 ```bash
 pip install "cloakwall[litellm]"
@@ -247,7 +251,9 @@ about 0.3 ms on Linux and about 100 ms on Windows (see Benchmarks).
 
 ## What it detects
 
-**Personal and health data:** email addresses, credit cards (Luhn-validated),
+**Personal and health data:** email addresses, credit cards (Luhn-validated
+by default; `--strict-cards` can redact card-shaped candidates regardless of
+check digit),
 SSNs, IBANs, medical record numbers, NHS numbers (modulus-11 validated),
 phone numbers including international formats, IPv4 addresses and dates of
 birth.
@@ -307,10 +313,45 @@ one is generated per boot, so tokens are stable within a run only.
 
 ## Audit trail
 
-Every entry commits to the SHA-256 of the entry before it and carries a
-monotonic sequence number. The chain head is mirrored to a separate anchor
-file after every append, and pushed to your SIEM every `anchor_every`
-entries.
+Every entry carries a monotonic sequence number and commits to the previous
+entry. By default the chain uses an unkeyed SHA-256 digest. Optionally, set an
+HMAC key outside the audit files (for example through a secrets manager and
+an environment variable) when starting the proxy:
+
+```powershell
+$env:CLOAKWALL_AUDIT_KEY = "load-a-long-random-key-from-your-secret-store"
+python -m cloakwall serve --upstream https://api.openai.com/v1 `
+  --audit-hmac-key-env CLOAKWALL_AUDIT_KEY
+```
+
+Verify a keyed log using the same key:
+
+```powershell
+python -m cloakwall verify .\cloakwall-audit.log `
+  --audit-hmac-key-env CLOAKWALL_AUDIT_KEY
+```
+
+HMAC detects edits by someone who can change the log but cannot access the
+key. Protect and back up that key separately; anyone who can access the key
+and rewrite the files can still forge entries. Do not put the key in the log,
+the command line, or beside the audit files.
+
+The chain head is mirrored to a local `.head` file after every append, and
+checkpoint events are also sent to the configured SIEM periodically. The
+local log and local head are in the same trust domain: an attacker who can
+rewrite both can replace an unkeyed chain and its anchor. For an independent
+truncation check, retain a checkpoint in a separately controlled SIEM or
+system and export it as JSON before verification:
+
+```powershell
+python -m cloakwall verify .\cloakwall-audit.log `
+  --anchor-file .\trusted-checkpoint.json `
+  --audit-hmac-key-env CLOAKWALL_AUDIT_KEY
+```
+
+The checkpoint JSON needs the `seq` and `hash` fields from the trusted anchor.
+An external anchor catches replacement or truncation back past that
+checkpoint; it does not prove that the local `.head` file itself is trusted.
 
 That combination catches all four tamper modes:
 
@@ -326,10 +367,11 @@ truncation — a prefix of a valid chain is itself a valid chain, so dropping
 the final entries verifies clean. The anchor still knows how many there
 should be.
 
-An anchor on the same filesystem stops accidental truncation and a careless
-attacker. An anchor in your SIEM, under different access control, stops
-someone who can write to the pod. Pass a SIEM-retrieved anchor to
-`verify(anchor=...)` to check against a copy the log cannot reach.
+An anchor on the same filesystem detects accidental truncation and edits to
+the log alone, but is not an independent defense against someone who can
+rewrite both files. An anchor retained by your SIEM under separate access
+control gives the verifier an independent checkpoint. Supply it with
+`--anchor-file` (or use `verify(anchor=...)` in Python).
 
 The log records which entity types were found and how many. **It never
 records the values that were redacted** — an audit log that quotes the PII it
@@ -343,8 +385,14 @@ export CLOAKWALL_SIEM_URL=https://splunk.internal:8088/services/collector
 export CLOAKWALL_SIEM_TOKEN=...
 ```
 
-Export runs on a worker thread. A slow or unreachable SIEM never adds latency
-to, or fails, an LLM request — the local log is the system of record.
+SIEM export runs on a worker thread and is best-effort; do not treat a send
+attempt as proof that the SIEM durably retained an anchor. Confirm the
+checkpoint is present and access-controlled before relying on it for
+verification. A failure writing the initial local request event stops the
+proxy request before it is forwarded. A failure writing a later response
+event cannot undo an upstream call that already happened; Cloakwall returns
+an error where possible, while a streaming response may already have reached
+the caller.
 
 ## Air-gapped
 

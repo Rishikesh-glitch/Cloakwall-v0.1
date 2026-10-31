@@ -29,10 +29,16 @@ def _serve(args: argparse.Namespace) -> int:
     from .proxy import CloakwallProxy
 
     key = None
+    audit_key = None
     if args.upstream_key_env:
         key = os.environ.get(args.upstream_key_env)
         if not key:
             print(f"error: environment variable {args.upstream_key_env} is not set", file=sys.stderr)
+            return 2
+    if args.audit_hmac_key_env:
+        audit_key = os.environ.get(args.audit_hmac_key_env)
+        if not audit_key:
+            print(f"error: environment variable {args.audit_hmac_key_env} is not set", file=sys.stderr)
             return 2
     try:
         proxy = CloakwallProxy(
@@ -40,6 +46,8 @@ def _serve(args: argparse.Namespace) -> int:
             redaction_mode=args.mode, entities=args.entities, audit_path=args.audit_path,
             block_on=args.block_on, redact_output=args.redact_output, restore=args.restore,
             upstream_key=key, stream_holdback=args.stream_holdback,
+            audit_hmac_key=audit_key.encode() if audit_key is not None else None,
+            strict_cards=args.strict_cards,
         )
     except (ValueError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -70,7 +78,8 @@ def _scan(args: argparse.Namespace) -> int:
     from .redact import Redactor
     from .scan import format_report, scan
 
-    redactor = Redactor(entities=set(args.entities) if args.entities else None)
+    redactor = Redactor(entities=set(args.entities) if args.entities else None,
+                        strict_cards=args.strict_cards)
     report = scan(args.paths, redactor=redactor, max_bytes=int(args.max_mb * 1024 * 1024),
                   stdin=sys.stdin)
     if args.json:
@@ -83,8 +92,24 @@ def _scan(args: argparse.Namespace) -> int:
 
 
 def _verify(args: argparse.Namespace) -> int:
+    import json
     from .audit import AuditLog
-    ok, msg = AuditLog(args.path).verify()
+    key = None
+    if args.audit_hmac_key_env:
+        key = os.environ.get(args.audit_hmac_key_env)
+        if not key:
+            print(f"error: environment variable {args.audit_hmac_key_env} is not set", file=sys.stderr)
+            return 2
+    anchor = None
+    if args.anchor_file:
+        try:
+            with open(args.anchor_file) as fh:
+                anchor = json.load(fh)
+        except (OSError, ValueError) as exc:
+            print(f"error: cannot read anchor file: {exc}", file=sys.stderr)
+            return 2
+    ok, msg = AuditLog(args.path, hmac_key=key.encode() if key is not None else None).verify(
+        anchor=anchor)
     print(("OK    " if ok else "FAIL  ") + msg)
     return 0 if ok else 1
 
@@ -115,6 +140,10 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--block-on", nargs="+", choices=sorted(DEFAULT_ENTITIES), metavar="ENTITY",
                    help="reject requests containing these entities instead of redacting")
     s.add_argument("--audit-path", default="./cloakwall-audit.log", help="audit log file")
+    s.add_argument("--audit-hmac-key-env", metavar="VAR",
+                   help="environment variable holding the audit HMAC key")
+    s.add_argument("--strict-cards", action="store_true",
+                   help="redact card-shaped numbers even when their Luhn check fails")
     s.add_argument("--stream-holdback", type=int, default=64,
                    help="characters held back while streaming with --redact-output")
     s.set_defaults(func=_serve)
@@ -132,10 +161,15 @@ def main(argv: list[str] | None = None) -> int:
                     help="only look for these")
     sc.add_argument("--max-mb", type=float, default=10.0,
                     help="skip files larger than this many MB (default 10)")
+    sc.add_argument("--strict-cards", action="store_true",
+                    help="report card-shaped numbers even when their Luhn check fails")
     sc.set_defaults(func=_scan)
 
     v = sub.add_parser("verify", help="check an audit log's hash chain and anchor")
     v.add_argument("path", help="audit log file")
+    v.add_argument("--audit-hmac-key-env", metavar="VAR",
+                   help="environment variable holding the audit HMAC key, if the log is keyed")
+    v.add_argument("--anchor-file", help="JSON anchor exported from a separately controlled system")
     v.set_defaults(func=_verify)
 
     args = ap.parse_args(argv)

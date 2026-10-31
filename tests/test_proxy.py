@@ -164,7 +164,7 @@ def sse_text(raw):
 
 
 def read_log(name, min_entries=1):
-    """The proxy writes response entries after replying; wait for them."""
+    """Wait for the requested audit entries to be present."""
     import time
     path = os.path.join(TMP, name)
     for _ in range(100):
@@ -211,6 +211,43 @@ check("upstream path mapping", Upstream.seen[-1][0], "/v1/models")
 
 status, _, body = call(p, "/cloakwall/health")
 check("health endpoint", (status, json.loads(body)["status"]), (200, "ok"))
+p.shutdown()
+
+section("Strict card detection and keyed audit")
+p = make(strict_cards=True, audit_hmac_key=b"proxy-audit-key", log="strict-keyed.log")
+status, _, _ = call(p, "/v1/chat/completions",
+                    {"model": "echo", "messages": [
+                        {"role": "user", "content": "order 1234567890123456"}]})
+check("strict mode redacts invalid card-shaped number upstream",
+      last_upstream_body()["messages"][0]["content"], "order <CARD>")
+check("keyed proxy audit verifies",
+      AuditLog(os.path.join(TMP, "strict-keyed.log"),
+               hmac_key=b"proxy-audit-key").verify()[0], True)
+os.environ["CLOAKWALL_TEST_AUDIT_KEY"] = "proxy-audit-key"
+check("CLI verifies HMAC log from environment",
+      cli_main(["verify", os.path.join(TMP, "strict-keyed.log"),
+                "--audit-hmac-key-env", "CLOAKWALL_TEST_AUDIT_KEY"]), 0)
+anchor_path = os.path.join(TMP, "trusted-checkpoint.json")
+with open(anchor_path, "w") as anchor_file:
+    json.dump(AuditLog(os.path.join(TMP, "strict-keyed.log")).read_anchor(), anchor_file)
+check("CLI accepts separately supplied checkpoint",
+      cli_main(["verify", os.path.join(TMP, "strict-keyed.log"),
+                "--audit-hmac-key-env", "CLOAKWALL_TEST_AUDIT_KEY",
+                "--anchor-file", anchor_path]), 0)
+os.environ.pop("CLOAKWALL_TEST_AUDIT_KEY")
+p.shutdown()
+
+section("Audit write failure")
+p = make(log="audit-failure.log")
+def fail_audit(*args, **kwargs):
+    raise OSError("disk unavailable")
+p.audit.append = fail_audit
+before = len(Upstream.seen)
+status, _, body = call(p, "/v1/chat/completions",
+                       {"model": "echo", "messages": [{"role": "user", "content": "hello"}]})
+check("audit write failure returns service unavailable",
+      (status, json.loads(body)["error"]["type"]), (503, "audit_unavailable"))
+check("audit failure prevents forwarding", len(Upstream.seen), before)
 p.shutdown()
 
 section("Upstream key from the environment")
