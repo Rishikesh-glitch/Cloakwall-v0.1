@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
 
@@ -94,7 +95,7 @@ check("connection-string password",
       r.redact("postgres://admin:S3cretPass@db.internal:5432/app").text,
       "postgres://<PASSWORD>@db.internal:5432/app")
 
-from cloakwall.redact import StreamRedactor
+from cloakwall.redact import StreamBufferOverflowError, StreamRedactor
 sr = StreamRedactor(r, holdback=64)
 streamed = "".join(sr.feed(c).text for c in
                    [("here:\n" + PEM + "\nok " + "x " * 40)[i:i + 7]
@@ -263,6 +264,38 @@ with tempfile.TemporaryDirectory() as d:
     check("all 60 entries written, chain intact",
           (log.read_anchor()["seq"], log.verify()[0]), (60, True))
 
+section("Concurrent audit writers across processes")
+with tempfile.TemporaryDirectory() as d:
+    path = os.path.join(d, "multiprocess.log")
+    project = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    worker_code = (
+        "import sys; sys.path.insert(0, sys.argv[1]); "
+        "from cloakwall.audit import AuditLog; "
+        "log = AuditLog(sys.argv[2]); "
+        "[log.append('process.event', worker=int(sys.argv[3]), n=i) "
+        "for i in range(int(sys.argv[4]))]"
+    )
+    workers = [
+        subprocess.Popen(
+            [sys.executable, "-c", worker_code, project, path, str(worker), "20"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        for worker in range(4)
+    ]
+    results = [worker.communicate(timeout=90) + (worker.returncode,) for worker in workers]
+    log = AuditLog(path)
+    with open(path) as fh:
+        entries = [json.loads(line) for line in fh if line.strip()]
+    check("all worker processes exit successfully",
+          [result[2] for result in results], [0, 0, 0, 0])
+    check("worker processes report no errors",
+          [result[1] for result in results], ["", "", "", ""])
+    check("all process writes retained with contiguous sequence numbers",
+          (len(entries), [entry["seq"] for entry in entries] == list(range(1, 81))),
+          (80, True))
+    check("multiprocess audit chain verifies",
+          (log.read_anchor()["seq"], log.verify()[0]), (80, True))
+
 # ---------------------------------------------------------------- guardrail
 section("Guardrail hook")
 
@@ -428,9 +461,6 @@ asyncio.run(coverage_tests())
 # ---------------------------------------------------------------- streaming
 section("Stream redaction")
 
-from cloakwall.redact import StreamRedactor
-
-
 def stream_through(text, pieces, mode="mask"):
     sr = StreamRedactor(Redactor(mode=mode, secret=b"s"), holdback=64)
     out, size = [], max(1, len(text) // pieces)
@@ -453,6 +483,88 @@ check("clean text passes through intact", stream_through("plain words " * 30, 50
 sr = StreamRedactor(Redactor(), holdback=64)
 check("short text held until flush", sr.feed("hi a@b.com").text, "")
 check("flush releases it redacted", sr.flush().text, "hi <EMAIL>")
+
+fragmented = "Contact alice@example.com tomorrow."
+fragmented_oracle = Redactor().redact(fragmented).text
+for split in range(len(fragmented) + 1):
+    sr = StreamRedactor(Redactor(), holdback=8)
+    emitted = ""
+    online_safe = True
+    for piece in (fragmented[:split], fragmented[split:]):
+        emitted += sr.feed(piece).text
+        online_safe = online_safe and fragmented_oracle.startswith(emitted)
+    emitted += sr.flush().text
+    online_safe = online_safe and fragmented_oracle.startswith(emitted)
+    check(f"single split at {split} matches oracle without unsafe emission",
+          (emitted, online_safe), (fragmented_oracle, True))
+
+sr = StreamRedactor(Redactor(), holdback=8)
+emitted = ""
+online_safe = True
+for char in fragmented:
+    emitted += sr.feed(char).text
+    online_safe = online_safe and fragmented_oracle.startswith(emitted)
+emitted += sr.flush().text
+online_safe = online_safe and fragmented_oracle.startswith(emitted)
+check("one-character chunks match oracle without unsafe emission",
+      (emitted, online_safe), (fragmented_oracle, True))
+
+eos_text = "Contact alice@example.com"
+sr = StreamRedactor(Redactor(), holdback=8)
+emitted = "".join(sr.feed(char).text for char in eos_text) + sr.flush().text
+check("end-of-stream immediately after address redacts the tail",
+      emitted, Redactor().redact(eos_text).text)
+
+boundary_holdback, boundary_pending = 8, 32
+max_candidate = boundary_pending - boundary_holdback + 1
+boundary_results = []
+overflow_flush_rejected = False
+for length in (max_candidate - 1, max_candidate, max_candidate + 1):
+    address = "a@" + "b" * (length - 6) + ".com"
+    text = address + "!" + "x" * (boundary_pending + 1 - len(address) - 1)
+    sr = StreamRedactor(Redactor(), holdback=boundary_holdback,
+                        max_pending=boundary_pending)
+    emitted = ""
+    oracle = Redactor().redact(text).text
+    online_safe = True
+    overflowed = False
+    for char in text:
+        try:
+            emitted += sr.feed(char).text
+            online_safe = online_safe and oracle.startswith(emitted)
+        except StreamBufferOverflowError:
+            overflowed = True
+            break
+    if not overflowed:
+        emitted += sr.flush().text
+        online_safe = online_safe and oracle.startswith(emitted)
+    else:
+        try:
+            sr.flush()
+        except StreamBufferOverflowError:
+            overflow_flush_rejected = True
+    boundary_results.append(
+        (length, overflowed, online_safe, emitted == oracle))
+check("entity length below and at the limit redacts; above fails closed",
+      boundary_results,
+      [(max_candidate - 1, False, True, True),
+       (max_candidate, False, True, True),
+       (max_candidate + 1, True, True, False)])
+check("overflowed stream cannot flush retained candidate",
+      overflow_flush_rejected, True)
+sr = StreamRedactor(Redactor(), holdback=boundary_holdback,
+                    max_pending=boundary_pending)
+ordinary = "x" * (boundary_pending + 40)
+ordinary_out = "".join(sr.feed(char).text for char in ordinary) + sr.flush().text
+check("ordinary long text crosses the buffer boundary unchanged",
+      ordinary_out, ordinary)
+ordinary_with_ey = "they" * (boundary_pending + 40)
+sr = StreamRedactor(Redactor(), holdback=boundary_holdback,
+                    max_pending=boundary_pending)
+ordinary_with_ey_out = "".join(
+    sr.feed(char).text for char in ordinary_with_ey) + sr.flush().text
+check("ordinary long text containing ey does not overflow",
+      ordinary_with_ey_out, ordinary_with_ey)
 
 # ---------------------------------------------------------------- output
 section("Response redaction")
@@ -540,6 +652,60 @@ async def output_tests():
         check("stats count redacted responses", g.stats()["responses_with_redactions"], 4)
         check("chain intact after output events", g.stats()["audit_intact"], True)
 
+        a_text = "Contact alice@example.com tomorrow."
+        b_text = "B stream stays independent " * 8
+        interleaved = [
+            NS(choices=[
+                NS(index=0, delta=NS(content="Contact alice@", tool_calls=None),
+                   finish_reason=None),
+                NS(index=1, delta=NS(content=b_text, tool_calls=None),
+                   finish_reason=None),
+            ]),
+            NS(choices=[
+                NS(index=0, delta=NS(content="example.com tomorrow.", tool_calls=None),
+                   finish_reason="stop"),
+                NS(index=1, delta=NS(content="", tool_calls=None),
+                   finish_reason="stop"),
+            ]),
+        ]
+        got = [c async for c in g.async_post_call_streaming_iterator_hook(
+            Key(), agen(interleaved), {"model": "m"})]
+        stream_text = {0: "", 1: ""}
+        stream_oracles = {
+            0: Redactor().redact(a_text).text,
+            1: Redactor().redact(b_text).text,
+        }
+        online_safe = True
+        for emitted_chunk in got:
+            for choice in emitted_chunk.choices:
+                content = choice.delta.content or ""
+                stream_text[choice.index] += content
+                online_safe = online_safe and stream_oracles[choice.index].startswith(
+                    stream_text[choice.index])
+        check("interleaved streams keep independent detector state",
+              stream_text, stream_oracles)
+        check("each interleaved cumulative emission is an oracle prefix",
+              online_safe, True)
+        check("stream B emits while stream A retains its partial email",
+              bool(got[0].choices[1].delta.content) and
+              not got[0].choices[0].delta.content, True)
+
+        abandoned = g.async_post_call_streaming_iterator_hook(
+            Key(), agen([chunk("cancel-only-user@")]), {"model": "m"})
+        first = await anext(abandoned)
+        await abandoned.aclose()
+        check("cancelled stream A has emitted no held candidate",
+              first.choices[0].delta.content, "")
+        reused = [c async for c in g.async_post_call_streaming_iterator_hook(
+            Key(), agen([chunk("fresh B response only", finish="stop")]),
+            {"model": "m"})]
+        reused_text = "".join(c.choices[0].delta.content or "" for c in reused)
+        check("reused guardrail does not retain cancelled stream text",
+              reused_text, "fresh B response only")
+        cancelled_audit = open(path).read()
+        check("cancelled text is absent from reused-stream audit events",
+              "cancel-only-user@" in cancelled_audit or
+              "cancel-only-user" in cancelled_audit, False)
 
 asyncio.run(output_tests())
 

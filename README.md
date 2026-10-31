@@ -70,7 +70,11 @@ What happens to replies:
 
 Both work on streamed replies: text is held back briefly so a value, or a
 token, split across chunks is still caught whole. Tool-call arguments are
-restored as valid JSON.
+restored as valid JSON. Output redaction uses a 64-character holdback and a
+4,096-character pending-buffer limit by default, supporting candidate spans up
+to 4,033 characters while streaming. If a potential sensitive candidate
+exceeds that limit, Cloakwall aborts the stream without flushing the pending
+text; ordinary long text is released at safe boundaries unchanged.
 
 Other options: `--block-on CARD SSN` rejects requests containing those
 entities instead of redacting them. `--strict-cards` also redacts card-shaped
@@ -376,6 +380,13 @@ control gives the verifier an independent checkpoint. Supply it with
 The log records which entity types were found and how many. **It never
 records the values that were redacted** — an audit log that quotes the PII it
 scrubbed is a second copy of the problem.
+
+Appends and verification use an OS-level lock on a sibling `.lock` file, in
+addition to an in-process thread lock. This serializes separate worker
+processes that share the same audit path and protects the log-plus-anchor
+update as one transaction. Keep the log, anchor and lock file on a filesystem
+that supports the platform's file-locking semantics; do not assume locking is
+reliable on every network filesystem.
 
 ## SIEM export
 

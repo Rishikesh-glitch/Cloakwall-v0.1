@@ -43,6 +43,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 GENESIS = "0" * 64
@@ -55,8 +56,41 @@ class AuditLog:
             raise ValueError("audit HMAC key must not be empty")
         self.path = path
         self.hmac_key = hmac_key
-        self._lock = threading.Lock()   # hooks run concurrently under uvicorn
+        self._lock_path = path + ".lock"
+        self._lock = threading.Lock()
         os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+
+    @contextmanager
+    def _file_lock(self):
+        """Lock the audit transaction across threads and writer processes."""
+        with open(self._lock_path, "a+b") as lock_file:
+            if os.name == "nt":
+                import msvcrt
+
+                lock_file.seek(0, os.SEEK_END)
+                if lock_file.tell() == 0:
+                    lock_file.write(b"\0")
+                    lock_file.flush()
+                while True:
+                    lock_file.seek(0)
+                    try:
+                        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError:
+                        time.sleep(0.05)
+                try:
+                    yield
+                finally:
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def _digest(self, prev: str, body: str) -> str:
         message = (prev + body).encode()
@@ -110,6 +144,10 @@ class AuditLog:
                 time.sleep(0.005 * (attempt + 1))
 
     def read_anchor(self) -> dict | None:
+        with self._lock, self._file_lock():
+            return self._read_anchor()
+
+    def _read_anchor(self) -> dict | None:
         try:
             with open(self.anchor_path) as fh:
                 return json.load(fh)
@@ -120,7 +158,7 @@ class AuditLog:
         reserved = {"ts", "seq", "event", "host", "prev", "hash_alg", "hash"}
         if reserved.intersection(fields):
             raise ValueError("audit fields cannot override reserved entry fields")
-        with self._lock:
+        with self._lock, self._file_lock():
             prev_seq, prev = self._last()
             entry = {
                 "ts": datetime.now(timezone.utc).isoformat(),
@@ -144,8 +182,12 @@ class AuditLog:
         """Verify the chain, and if an anchor is available, verify the log has
         not been truncated. Pass an anchor retrieved from your SIEM to check
         against a copy the log's own filesystem cannot reach."""
+        with self._lock, self._file_lock():
+            return self._verify_locked(anchor)
+
+    def _verify_locked(self, anchor: dict | None) -> tuple[bool, str]:
         try:
-            a = anchor if anchor is not None else self.read_anchor()
+            a = anchor if anchor is not None else self._read_anchor()
         except (OSError, ValueError) as exc:
             return False, f"cannot read anchor: {exc}"
         if a is not None:

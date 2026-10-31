@@ -330,6 +330,13 @@ _BINARY_PARTS = frozenset({
 })
 
 
+class StreamBufferOverflowError(RuntimeError):
+    """Raised when a sensitive stream candidate exceeds the safe buffer limit."""
+
+
+_STREAM_CANDIDATE_MARKERS = ("@", *_KEY_PREFIXES)
+
+
 class StreamRedactor:
     """Redacts text that arrives in fragments, as a streamed response does.
 
@@ -337,9 +344,11 @@ class StreamRedactor:
     "1111 1111" in the next are both harmless, together they are a card. So
     the last `holdback` characters are held back until more text arrives,
     and text is only released at a whitespace boundary that no detected
-    entity spans. Every detector matches less than `holdback` characters, so
-    anything that starts in the released part is complete by the time it is
-    released. flush() releases the rest when the stream ends.
+    entity spans. A potential sensitive candidate that cannot be safely cut
+    before the pending buffer limit raises StreamBufferOverflowError instead
+    of being emitted. The maximum supported candidate length is
+    `max_pending - holdback + 1` characters; flush() redacts and releases the
+    remaining text when the stream ends.
 
     The cost is latency, not tokens: the client sees text `holdback`
     characters later than it would otherwise, and sees all of it."""
@@ -348,12 +357,15 @@ class StreamRedactor:
                  max_pending: int = 4096):
         self.redactor = redactor
         self.holdback = holdback
-        # A long run with no safe boundary (base64, minified JSON) must not
-        # be held forever; past this size it is cut at the holdback line.
+        # A long run with no safe boundary must not be held forever. Ordinary
+        # text is cut at the holdback line; a possible sensitive candidate
+        # that reaches this limit fails closed instead.
         self.max_pending = max(max_pending, holdback * 2)
         self._pending = ""
+        self._overflowed = False
 
     def feed(self, fragment: str) -> Result:
+        self._ensure_usable()
         self._pending += fragment
         limit = len(self._pending) - self.holdback
         if limit <= 0:
@@ -365,6 +377,7 @@ class StreamRedactor:
         return self.redactor.redact(ready)
 
     def flush(self) -> Result:
+        self._ensure_usable()
         ready, self._pending = self._pending, ""
         return self.redactor.redact(ready)
 
@@ -389,6 +402,30 @@ class StreamRedactor:
                 continue
             if not inside(c):
                 return c
-        if len(p) > self.max_pending and not inside(limit):
+        if len(p) > self.max_pending:
+            if inside(limit) or self._has_unmatched_candidate_marker(p, limit, spans):
+                self._overflowed = True
+                max_candidate = self.max_pending - self.holdback + 1
+                raise StreamBufferOverflowError(
+                    "stream candidate exceeds the maximum supported length "
+                    f"of {max_candidate} characters; abort the stream without "
+                    "flushing pending text")
             return limit
         return 0
+
+    @staticmethod
+    def _has_unmatched_candidate_marker(p: str, limit: int,
+                                       spans: list[tuple[int, int]]) -> bool:
+        for marker in _STREAM_CANDIDATE_MARKERS:
+            start = p.find(marker, 0, limit)
+            while start >= 0:
+                if not any(span_start <= start < span_end
+                           for span_start, span_end in spans):
+                    return True
+                start = p.find(marker, start + 1, limit)
+        return False
+
+    def _ensure_usable(self) -> None:
+        if self._overflowed:
+            raise StreamBufferOverflowError(
+                "stream redactor cannot be reused after a buffer overflow")
