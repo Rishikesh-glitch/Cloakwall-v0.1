@@ -37,8 +37,12 @@ guardrails:
                                   # redact_output: true below.
       default_on: true
       redaction_mode: mask        # mask | hash | partial
+      # Optional: load a long random key from your secrets manager.
+      # The key must remain outside the audit log directory.
+      # audit_hmac_key_env: CLOAKWALL_AUDIT_KEY
+      # strict_cards: true        # redact card-shaped candidates even if Luhn fails
       audit_path: /var/log/cloakwall/audit.log
-      fail_closed: true           # reject rather than forward unscrubbed text
+      fail_closed: true           # governs redaction errors, not audit write errors
       # redact_output: true       # also mask PII in model responses,
       #                           # streamed or not (needs post_call mode)
       # stream_holdback: 64       # chars held back while streaming

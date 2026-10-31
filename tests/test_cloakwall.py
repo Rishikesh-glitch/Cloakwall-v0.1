@@ -7,6 +7,7 @@ environment should be able to run the tests with nothing but python3.
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -42,6 +43,9 @@ check("email", r.redact("write to a.b+c@x.co.uk now").text, "write to <EMAIL> no
 check("valid card redacted", r.redact("card 4111111111111111").text, "card <CARD>")
 check("invalid card left alone", r.redact("order 1234567890123456").text,
       "order 1234567890123456")
+strict_cards = Redactor(mode="mask", strict_cards=True)
+check("strict cards redacts invalid card-shaped number",
+      strict_cards.redact("order 1234567890123456").text, "order <CARD>")
 check("ssn", r.redact("ssn 123-45-6789").text, "ssn <SSN>")
 check("aws key", r.redact("AKIAIOSFODNN7EXAMPLE").text, "<AWS_KEY>")
 check("sri lankan phone", r.redact("call +94 77 123 4567").text, "call <PHONE>")
@@ -120,6 +124,9 @@ check("hash differs under another secret",
       != Redactor(mode="hash", secret=b"k2").redact("a@b.com").text, True)
 check("partial keeps card tail",
       Redactor(mode="partial").redact("4111111111111111").text, "<CARD:****1111>")
+check("strict cards retains the standard card mask",
+      Redactor(mode="partial", strict_cards=True)
+      .redact("order 1234567890123456").text, "order <CARD:****3456>")
 
 # ---------------------------------------------------------------- overlaps
 section("Overlapping spans")
@@ -168,11 +175,63 @@ with tempfile.TemporaryDirectory() as d:
     check("reports the shortfall", "anchor records 10" in msg, True)
 
 with tempfile.TemporaryDirectory() as d:
+    log = AuditLog(os.path.join(d, "external-anchor.log"))
+    log.append("test.event", n=1)
+    log.append("test.event", n=2)
+    anchor = log.read_anchor()
+    log.append("test.event", n=3)
+
+    with open(log.path) as fh:
+        entries = [json.loads(line) for line in fh if line.strip()]
+    entries[0]["n"] = 99
+    prev = "0" * 64
+    for entry in entries:
+        entry.pop("hash")
+        entry["prev"] = prev
+        digest = hashlib.sha256(
+            (prev + json.dumps(entry, sort_keys=True)).encode()).hexdigest()
+        entry["hash"] = digest
+        prev = digest
+    with open(log.path, "w") as fh:
+        for entry in entries:
+            fh.write(json.dumps(entry, sort_keys=True) + "\n")
+
+    ok, msg = log.verify(anchor=anchor)
+    check("external anchor detects rewritten history with newer entries", ok, False)
+    check("identifies the mismatching anchor sequence", "sequence 2" in msg, True)
+
+with tempfile.TemporaryDirectory() as d:
+    log = AuditLog(os.path.join(d, "missing.log"))
+    log.append("test.event", n=1)
+    anchor = log.read_anchor()
+    os.remove(log.path)
+    ok, msg = log.verify(anchor=anchor)
+    check("external anchor detects a missing log", ok, False)
+    check("reports all anchored entries missing", "log holds 0" in msg, True)
+
+with tempfile.TemporaryDirectory() as d:
     log = AuditLog(os.path.join(d, "s.log"))
     for i in range(5):
         log.append("e", n=i)
     seqs = [json.loads(l)["seq"] for l in open(log.path) if l.strip()]
     check("sequence numbers are contiguous", seqs, [1, 2, 3, 4, 5])
+
+section("Keyed audit chain")
+with tempfile.TemporaryDirectory() as d:
+    path = os.path.join(d, "keyed.log")
+    log = AuditLog(path, hmac_key=b"external-test-key")
+    log.append("test.event", n=1)
+    anchor = log.read_anchor()
+    check("HMAC chain verifies with key", log.verify()[0], True)
+    check("HMAC chain refuses verification without key",
+          AuditLog(path).verify(), (False, "HMAC key required to verify this audit log"))
+    check("HMAC chain refuses a wrong key",
+          AuditLog(path, hmac_key=b"wrong-key").verify()[0], False)
+    check("external anchor verifies keyed chain",
+          log.verify(anchor=anchor)[0], True)
+    check("malformed external anchor fails closed",
+          log.verify(anchor={"seq": "bad", "hash": "bad"}),
+          (False, "invalid anchor: expected seq and hash fields"))
 
 section("Concurrent appends and verifies")
 with tempfile.TemporaryDirectory() as d:
@@ -233,8 +292,8 @@ async def guardrail_tests():
             Key(), None,
             {"model": "m", "messages": [{"role": "user", "content": "hello"}]},
             "acompletion")
-        check("clean request logs nothing extra",
-              len([l for l in open(path) if l.strip()]), 1)
+        check("clean request is audited",
+              len([l for l in open(path) if l.strip()]), 3)
 
         multimodal = {"model": "m", "messages": [{"role": "user", "content": [
             {"type": "text", "text": "ssn 123-45-6789"},
@@ -274,6 +333,20 @@ async def guardrail_tests():
         check("non-blocked entity still redacted",
               ok["messages"][0]["content"], "mail <EMAIL>")
         check("block counted in stats", b.stats()["requests_blocked"], 1)
+
+    with tempfile.TemporaryDirectory() as d:
+        g = Cloakwall(audit_path=os.path.join(d, "write-failure.log"))
+        def fail_append(*args, **kwargs):
+            raise OSError("disk unavailable")
+        g.audit.append = fail_append
+        stopped = False
+        try:
+            await g.async_pre_call_hook(
+                Key(), None, {"model": "m", "messages": [{"role": "user", "content": "hello"}]},
+                "acompletion")
+        except OSError:
+            stopped = True
+        check("audit write failure stops the guardrail pre-call", stopped, True)
 
 
 asyncio.run(guardrail_tests())

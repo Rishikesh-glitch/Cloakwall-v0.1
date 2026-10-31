@@ -154,11 +154,13 @@ class Result:
 
 class Redactor:
     def __init__(self, mode: str = "mask", entities: set[str] | None = None,
-                 secret: bytes | None = None, extra: list[Detector] | None = None):
+                 secret: bytes | None = None, extra: list[Detector] | None = None,
+                 strict_cards: bool = False):
         if mode not in ("mask", "hash", "partial"):
             raise ValueError("mode must be mask, hash or partial")
         self.mode = mode
         self.entities = entities or set(DEFAULT_ENTITIES)
+        self.strict_cards = strict_cards
 
         # The pseudonymisation secret never leaves the process. If none is
         # supplied we generate one per boot, which means tokens are stable
@@ -207,7 +209,8 @@ class Redactor:
                 continue
             for m in det.pattern.finditer(text):
                 value = m.group(0)
-                if det.validate and not det.validate(value):
+                if (det.validate and not (self.strict_cards and det.name == "CARD")
+                        and not det.validate(value)):
                     continue      # e.g. a 16-digit order number failing Luhn
                 spans.append((m.start(), m.end(), det, value))
 
