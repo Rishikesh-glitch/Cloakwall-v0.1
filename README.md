@@ -77,9 +77,9 @@ exceeds that limit, Cloakwall aborts the stream without flushing the pending
 text; ordinary long text is released at safe boundaries unchanged.
 
 Other options: `--block-on CARD SSN` rejects requests containing those
-entities instead of redacting them. `--strict-cards` also redacts card-shaped
-numbers that fail Luhn validation, which reduces missed typos at the cost of
-false positives. `--entities` limits what is detected.
+entities instead of redacting them. Card-shaped candidates are redacted
+regardless of their Luhn result; the deprecated `--strict-cards` flag remains
+accepted for compatibility. `--entities` limits what is detected.
 `--audit-path` sets the log file, and `cloakwall verify <log>` checks it.
 
 If you omit `--upstream-key-env`, the caller's `Authorization` header is
@@ -255,10 +255,8 @@ about 0.3 ms on Linux and about 100 ms on Windows (see Benchmarks).
 
 ## What it detects
 
-**Personal and health data:** email addresses, credit cards (Luhn-validated
-by default; `--strict-cards` can redact card-shaped candidates regardless of
-check digit),
-SSNs, IBANs, medical record numbers, NHS numbers (modulus-11 validated),
+**Personal and health data:** email addresses, credit-card-shaped candidates,
+SSNs, IBANs, medical record numbers, NHS-shaped candidates,
 phone numbers including international formats, IPv4 addresses and dates of
 birth.
 
@@ -270,10 +268,12 @@ over a stream), and the credentials in connection strings
 The whole key is always replaced: real keys contain `-` and `_`, and a
 redactor that stops at the first one leaves the tail of the key in the prompt.
 
-The validators matter more than the patterns. Without a Luhn check every
-16-digit order number gets flagged; without the NHS checksum every US phone
-number gets labelled a health identifier. Both are the reason teams turn
-regex redaction off after a week.
+Luhn and NHS modulus-11 checks are recorded as confidence signals, not used
+to decide whether a candidate is redacted. This prevents mistyped or
+truncated identifiers from reaching the model. Audit events include
+`validation` counts by detector, separating `checksum_confirmed` candidates
+from `shape_only` candidates; aggregating those counts gives per-detector
+checksum rates without recording the candidate values.
 
 Missing a format you use? Open an issue with its *shape* (prefix and
 length), never a real key.

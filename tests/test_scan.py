@@ -81,10 +81,11 @@ t = rep.totals
 check("letters-only API key in .env", t.get("API_KEY"), 1)
 check("letters-only AWS key in .env", t.get("AWS_KEY"), 1)
 check("emails: jsonl, escaped \\u0040, json key", t.get("EMAIL"), 3)
-check("cards: jsonl and json value", t.get("CARD"), 2)
+check("cards: JSONL, JSON, and shape-only candidates", t.get("CARD"), 3)
 check("SSN in a non-JSON line of a .jsonl file", t.get("SSN"), 1)
 check("MRN in a text file", t.get("MRN"), 1)
-check("order number failing Luhn is not a card", t.get("CARD"), 2)
+check("shape-only card candidate reported",
+      any(f.path.endswith("notes.txt") and f.entity == "CARD" for f in rep.findings), True)
 paths = {os.path.relpath(f.path, root) for f in rep.findings}
 check(".git and node_modules skipped", any(p.startswith((".git", "node_modules")) for p in paths), False)
 skipped = {os.path.basename(p): why for p, why in rep.skipped}

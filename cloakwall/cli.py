@@ -143,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--audit-hmac-key-env", metavar="VAR",
                    help="environment variable holding the audit HMAC key")
     s.add_argument("--strict-cards", action="store_true",
-                   help="redact card-shaped numbers even when their Luhn check fails")
+                   help="deprecated compatibility flag; card-shaped candidates are always redacted")
     s.add_argument("--stream-holdback", type=int, default=64,
                    help="characters held back while streaming with --redact-output")
     s.set_defaults(func=_serve)
@@ -162,7 +162,7 @@ def main(argv: list[str] | None = None) -> int:
     sc.add_argument("--max-mb", type=float, default=10.0,
                     help="skip files larger than this many MB (default 10)")
     sc.add_argument("--strict-cards", action="store_true",
-                    help="report card-shaped numbers even when their Luhn check fails")
+                    help="deprecated compatibility flag; card-shaped candidates are always reported")
     sc.set_defaults(func=_scan)
 
     v = sub.add_parser("verify", help="check an audit log's hash chain and anchor")

@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from cloakwall.audit import AuditLog
 from cloakwall.guardrail import Cloakwall
-from cloakwall.redact import Redactor, _luhn, _nhs
+from cloakwall.redact import Redactor, _luhn, _nhs, validation_counts
 
 PASS = FAIL = 0
 
@@ -42,15 +42,27 @@ section("Detection")
 r = Redactor(mode="mask", secret=b"test")
 check("email", r.redact("write to a.b+c@x.co.uk now").text, "write to <EMAIL> now")
 check("valid card redacted", r.redact("card 4111111111111111").text, "card <CARD>")
-check("invalid card left alone", r.redact("order 1234567890123456").text,
-      "order 1234567890123456")
+invalid_card = r.redact("order 1234567890123456")
+check("invalid card-shaped candidate redacted", invalid_card.text, "order <CARD>")
+check("invalid card checksum retained", invalid_card.redactions[0].checksum_valid, False)
+invalid_nhs = r.redact("number 5558675309")
+check("invalid NHS-shaped candidate redacted", invalid_nhs.text, "number <NHS>")
+check("invalid NHS checksum retained", invalid_nhs.redactions[0].checksum_valid, False)
+check("validation counts are grouped by detector",
+      validation_counts(invalid_card.redactions + invalid_nhs.redactions),
+      {"CARD": {"checksum_confirmed": 0, "shape_only": 1},
+       "NHS": {"checksum_confirmed": 0, "shape_only": 1}})
 strict_cards = Redactor(mode="mask", strict_cards=True)
 check("strict cards redacts invalid card-shaped number",
       strict_cards.redact("order 1234567890123456").text, "order <CARD>")
 check("ssn", r.redact("ssn 123-45-6789").text, "ssn <SSN>")
 check("aws key", r.redact("AKIAIOSFODNN7EXAMPLE").text, "<AWS_KEY>")
 check("sri lankan phone", r.redact("call +94 77 123 4567").text, "call <PHONE>")
-check("us phone is PHONE not NHS", r.redact("call 555-867-5309").text, "call <PHONE>")
+us_phone_shape = r.redact("call 555-867-5309")
+check("phone matching NHS shape is redacted conservatively",
+      us_phone_shape.text, "call <NHS>")
+check("phone-shaped NHS candidate is checksum-marked",
+      us_phone_shape.redactions[0].checksum_valid, False)
 check("real nhs number", r.redact("nhs 943 476 5919").text, "nhs <NHS>")
 check("clean text untouched", r.redact("the quick brown fox").text,
       "the quick brown fox")
@@ -112,8 +124,37 @@ for text in ["use sk-learn-compatible-estimator here", "pip install scikit-learn
 section("Validators")
 check("luhn accepts real card", _luhn("4111111111111111"), True)
 check("luhn rejects sequence", _luhn("1234567890123456"), False)
+check("luhn rejects overlength PAN", _luhn("12345678901234567890"), False)
 check("nhs accepts valid", _nhs("9434765919"), True)
 check("nhs rejects phone", _nhs("5558675309"), False)
+
+def valid_luhn_number(length):
+    body = "1234567890123456789"[:length - 1]
+    return next(body + digit for digit in "0123456789" if _luhn(body + digit))
+
+
+for length in range(13, 20):
+    number = valid_luhn_number(length)
+    spaced = " ".join(number[i:i + 4] for i in range(0, length, 4))
+    check(f"{length}-digit card redacted whole, contiguous",
+          r.redact(number).text, "<CARD>")
+    check(f"{length}-digit card redacted whole, spaced",
+          r.redact(spaced).text, "<CARD>")
+check("repeated card separators do not leave digits exposed",
+      r.redact("4111  1111    1111  1111").text, "<CARD>")
+check("mixed card separators do not leave digits exposed",
+      r.redact("4111- 1111 -1111-1111").text, "<CARD>")
+check("12-digit value is below card candidate length",
+      r.redact("123456789012").text, "123456789012")
+check("20-digit run is not partially redacted",
+      r.redact("12345678901234567890").text, "12345678901234567890")
+long_spaced = r.redact("1234  5678  9012  3456  7890")
+check("overlength separated run is redacted whole, not partially",
+      long_spaced.text, "<CARD>")
+check("overlength separated run is not checksum-confirmed",
+      long_spaced.redactions[0].checksum_valid, False)
+check("card-like digits adjacent to letters are not partially redacted",
+      r.redact("x4111111111111111x").text, "x4111111111111111x")
 
 # ---------------------------------------------------------------- modes
 section("Redaction modes")
@@ -311,15 +352,23 @@ async def guardrail_tests():
         g = Cloakwall(redaction_mode="mask", audit_path=path)
 
         data = {"model": "m", "messages": [
-            {"role": "user", "content": "card 4111111111111111 mail z@y.com"}]}
+            {"role": "user", "content": (
+                "card 4111111111111111 order 1234567890123456 mail z@y.com")} ]}
         out = await g.async_pre_call_hook(Key(), None, data, "acompletion")
         check("request redacted in place",
-              out["messages"][0]["content"], "card <CARD> mail <EMAIL>")
+              out["messages"][0]["content"],
+              "card <CARD> order <CARD> mail <EMAIL>")
 
         raw = open(path).read()
         check("card absent from audit log", "4111111111111111" in raw, False)
         check("email absent from audit log", "z@y.com" in raw, False)
-        check("entity counts recorded", '"CARD": 1' in raw, True)
+        check("entity counts recorded", '"CARD": 2' in raw, True)
+        redacted_event = next(
+            json.loads(line) for line in raw.splitlines()
+            if json.loads(line).get("event") == "cloakwall.redacted")
+        check("audit records card checksum outcomes",
+              redacted_event["validation"],
+              {"CARD": {"checksum_confirmed": 1, "shape_only": 1}})
 
         await g.async_pre_call_hook(
             Key(), None,
@@ -339,6 +388,9 @@ async def guardrail_tests():
         out = await g.async_pre_call_hook(
             Key(), None, {"model": "m"}, "acompletion")
         check("request with no messages survives", out, {"model": "m"})
+        empty_request_event = json.loads(open(path).read().splitlines()[-1])
+        check("empty request audit has empty validation results",
+              empty_request_event["validation"], {})
 
         check("stats report intact chain", g.stats()["audit_intact"], True)
 
@@ -598,10 +650,11 @@ async def output_tests():
 
         g = Cloakwall(audit_path=path, redact_output=True)
         resp = NS(choices=[NS(index=0, finish_reason="tool_calls", message=NS(
-            content="card 4111111111111111",
+            content="card 4111111111111111 order 1234567890123456",
             tool_calls=[NS(function=NS(name="f", arguments='{"m":"a@b.com"}'))]))])
         await g.async_post_call_success_hook({"model": "m"}, Key(), resp)
-        check("response content redacted", resp.choices[0].message.content, "card <CARD>")
+        check("response redacts confirmed and shape-only cards",
+              resp.choices[0].message.content, "card <CARD> order <CARD>")
         check("response tool args redacted",
               resp.choices[0].message.tool_calls[0].function.arguments, '{"m":"<EMAIL>"}')
 
@@ -616,14 +669,15 @@ async def output_tests():
         check("assembled stream copy not re-redacted", resp["choices"][0]["text"],
               "mail a@b.com")
 
-        text = "Sure. The card on file is 4111 1111 1111 1111 and the email is bob@clinic.org."
+        text = ("Sure. The card on file is 4111 1111 1111 1111, "
+                "and order 1234567890123456; email bob@clinic.org.")
         parts = [text[i:i + 5] for i in range(0, len(text), 5)]
         chunks = [chunk(p) for p in parts] + [chunk(None, finish="stop")]
         got = [c async for c in g.async_post_call_streaming_iterator_hook(
             Key(), agen(chunks), {"model": "m"})]
         streamed = "".join(c.choices[0].delta.content or "" for c in got)
         check("stream redacts PII split across chunks", streamed,
-              "Sure. The card on file is <CARD> and the email is <EMAIL>.")
+              "Sure. The card on file is <CARD>, and order <CARD>; email <EMAIL>.")
         check("finish chunk still last", got[-1].choices[0].finish_reason, "stop")
         check("no raw card reaches the client", "1111" in streamed, False)
 
@@ -649,6 +703,14 @@ async def output_tests():
               any(v in raw for v in ("bob@clinic.org", "4111111111111111",
                                      "4111 1111 1111 1111", "A1234567")), False)
         check("output redactions audited", raw.count("cloakwall.redacted_output"), 4)
+        output_events = [json.loads(line) for line in raw.splitlines()
+                         if json.loads(line).get("event") == "cloakwall.redacted_output"]
+        check("completed response audit separates card checksum outcomes",
+              output_events[0]["validation"],
+              {"CARD": {"checksum_confirmed": 1, "shape_only": 1}})
+        check("stream audit separates card checksum outcomes",
+              output_events[2]["validation"],
+              {"CARD": {"checksum_confirmed": 1, "shape_only": 1}})
         check("stats count redacted responses", g.stats()["responses_with_redactions"], 4)
         check("chain intact after output events", g.stats()["audit_intact"], True)
 

@@ -213,25 +213,32 @@ status, _, body = call(p, "/cloakwall/health")
 check("health endpoint", (status, json.loads(body)["status"]), (200, "ok"))
 p.shutdown()
 
-section("Strict card detection and keyed audit")
-p = make(strict_cards=True, audit_hmac_key=b"proxy-audit-key", log="strict-keyed.log")
+section("Candidate redaction and keyed audit")
+p = make(audit_hmac_key=b"proxy-audit-key", log="candidate-keyed.log")
 status, _, _ = call(p, "/v1/chat/completions",
                     {"model": "echo", "messages": [
-                        {"role": "user", "content": "order 1234567890123456"}]})
-check("strict mode redacts invalid card-shaped number upstream",
-      last_upstream_body()["messages"][0]["content"], "order <CARD>")
+                        {"role": "user", "content": (
+                            "order 1234567890123456 card 4111111111111111")}]})
+check("shape-only and checksum-confirmed cards are redacted upstream",
+      last_upstream_body()["messages"][0]["content"],
+      "order <CARD> card <CARD>")
+events = [json.loads(line) for line in read_log("candidate-keyed.log").splitlines()]
+redacted_event = next(e for e in events if e["event"] == "cloakwall.redacted")
+check("proxy audit separates checksum outcomes by detector",
+      redacted_event["validation"],
+      {"CARD": {"checksum_confirmed": 1, "shape_only": 1}})
 check("keyed proxy audit verifies",
-      AuditLog(os.path.join(TMP, "strict-keyed.log"),
+      AuditLog(os.path.join(TMP, "candidate-keyed.log"),
                hmac_key=b"proxy-audit-key").verify()[0], True)
 os.environ["CLOAKWALL_TEST_AUDIT_KEY"] = "proxy-audit-key"
 check("CLI verifies HMAC log from environment",
-      cli_main(["verify", os.path.join(TMP, "strict-keyed.log"),
+      cli_main(["verify", os.path.join(TMP, "candidate-keyed.log"),
                 "--audit-hmac-key-env", "CLOAKWALL_TEST_AUDIT_KEY"]), 0)
 anchor_path = os.path.join(TMP, "trusted-checkpoint.json")
 with open(anchor_path, "w") as anchor_file:
-    json.dump(AuditLog(os.path.join(TMP, "strict-keyed.log")).read_anchor(), anchor_file)
+    json.dump(AuditLog(os.path.join(TMP, "candidate-keyed.log")).read_anchor(), anchor_file)
 check("CLI accepts separately supplied checkpoint",
-      cli_main(["verify", os.path.join(TMP, "strict-keyed.log"),
+      cli_main(["verify", os.path.join(TMP, "candidate-keyed.log"),
                 "--audit-hmac-key-env", "CLOAKWALL_TEST_AUDIT_KEY",
                 "--anchor-file", anchor_path]), 0)
 os.environ.pop("CLOAKWALL_TEST_AUDIT_KEY")

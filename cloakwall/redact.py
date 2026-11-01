@@ -35,10 +35,9 @@ from typing import Callable
 
 
 def _luhn(digits: str) -> bool:
-    """Card check digit. Without this, any 16-digit order number gets
-    flagged and users lose trust in the redactor within a day."""
+    """Return whether a card-shaped candidate passes its Luhn check."""
     n = [int(c) for c in digits if c.isdigit()]
-    if len(n) < 13:
+    if not 13 <= len(n) <= 19:
         return False
     total, parity = 0, len(n) % 2
     for i, d in enumerate(n):
@@ -51,9 +50,7 @@ def _luhn(digits: str) -> bool:
 
 
 def _nhs(value: str) -> bool:
-    """NHS numbers are 10 digits in a 3-3-4 grouping -- identical in shape to
-    a US phone number. Without the modulus-11 check digit this detector
-    swallows every phone number it sees and labels it a health identifier."""
+    """Return whether an NHS-shaped candidate passes its modulus-11 check."""
     n = [int(c) for c in value if c.isdigit()]
     if len(n) != 10:
         return False
@@ -79,8 +76,14 @@ class Detector:
 
 # Order matters. Specific formats first so they claim their text before a
 # looser pattern can chew into it.
+CARD_DETECTOR = Detector("CARD", re.compile(
+    r"\b\d(?:[ -]*\d){12,18}\b"
+    r"(?:(?![ -]*\d)|(?=[ -]*\d{3}-\d{2}-\d{4}\b))"),
+    _luhn, keep_tail=4)
 DETECTORS: list[Detector] = [
-    Detector("CARD", re.compile(r"\b(?:\d[ -]*?){13,19}\b"), _luhn, keep_tail=4),
+    # Require the full digit run, except when a following SSN is a separate
+    # candidate; otherwise a longer spaced card can be only partly matched.
+    CARD_DETECTOR,
     Detector("SSN", re.compile(r"\b(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b"), gate=("-",)),
     Detector("IBAN", re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b")),
     Detector("EMAIL", re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]{2,}\b"), gate=("@",)),
@@ -137,6 +140,7 @@ class Redaction:
     start: int
     end: int
     token: str
+    checksum_valid: bool | None = None
 
 
 @dataclass
@@ -152,6 +156,21 @@ class Result:
         return out
 
 
+def validation_counts(redactions: list[Redaction]) -> dict[str, dict[str, int]]:
+    """Count checksum-confirmed and shape-only candidates by detector."""
+    out: dict[str, dict[str, int]] = {}
+    for redaction in redactions:
+        if redaction.checksum_valid is None:
+            continue
+        outcome = "checksum_confirmed" if redaction.checksum_valid else "shape_only"
+        counts = out.setdefault(redaction.entity, {
+            "checksum_confirmed": 0,
+            "shape_only": 0,
+        })
+        counts[outcome] += 1
+    return out
+
+
 class Redactor:
     def __init__(self, mode: str = "mask", entities: set[str] | None = None,
                  secret: bytes | None = None, extra: list[Detector] | None = None,
@@ -160,6 +179,8 @@ class Redactor:
             raise ValueError("mode must be mask, hash or partial")
         self.mode = mode
         self.entities = entities or set(DEFAULT_ENTITIES)
+        # Kept for callers using older configurations. Checksum results no
+        # longer gate redaction, so this option does not change detection.
         self.strict_cards = strict_cards
 
         # The pseudonymisation secret never leaves the process. If none is
@@ -203,36 +224,50 @@ class Redactor:
         # orders of magnitude cheaper than a regex scan, so a detector whose
         # required literal is absent never runs. On typical traffic this
         # skips most of them.
-        spans: list[tuple[int, int, Detector, str]] = []
+        spans: list[tuple[int, int, Detector, str, bool | None]] = []
         for det in self.detectors:
             if det.gate and not any(g in text for g in det.gate):
                 continue
             for m in det.pattern.finditer(text):
                 value = m.group(0)
-                if (det.validate and not (self.strict_cards and det.name == "CARD")
-                        and not det.validate(value)):
-                    continue      # e.g. a 16-digit order number failing Luhn
-                spans.append((m.start(), m.end(), det, value))
+                checksum_valid = det.validate(value) if det.validate else None
+                spans.append((m.start(), m.end(), det, value, checksum_valid))
+
+        # A separated run longer than a PAN can still be partly matched by
+        # other detectors. Mask the whole run if those matches leave digits
+        # uncovered; do not emit a partial redaction.
+        for match in re.finditer(r"\b\d(?:[ -]*\d){12,}\b", text):
+            value = match.group(0)
+            if (not any(c in " -" for c in value)
+                    or sum(c.isdigit() for c in value) <= 19):
+                continue
+            digit_positions = (m.start() for m in re.finditer(r"\d", value))
+            if all(
+                any(start <= match.start() + position < end
+                    for start, end, _, _, _ in spans)
+                for position in digit_positions
+            ):
+                continue
+            spans.append((match.start(), match.end(), CARD_DETECTOR, value, False))
 
         if not spans:
             return Result(text=text, redactions=[])
 
-        # Earliest start wins; on a tie the longer match wins. This is what
-        # keeps a card from being claimed by the phone pattern, and it is why
-        # a detector failing its validator falls through to the next one --
-        # the reason a single combined alternation could not be used here.
+        # Earliest start wins; on a tie the longer match wins. This keeps a
+        # card from being claimed by the phone pattern. Checksum results are
+        # metadata, so failing a validator does not remove a candidate.
         spans.sort(key=lambda s: (s[0], -(s[1] - s[0])))
 
         out: list[str] = []
         redactions: list[Redaction] = []
         cursor = 0
-        for start, end, det, value in spans:
+        for start, end, det, value, checksum_valid in spans:
             if start < cursor:
                 continue                      # overlapped by an earlier span
             token = self._token(det.name, value, det.keep_tail)
             out.append(text[cursor:start])
             out.append(token)
-            redactions.append(Redaction(det.name, start, end, token))
+            redactions.append(Redaction(det.name, start, end, token, checksum_valid))
             cursor = end
         out.append(text[cursor:])
 
