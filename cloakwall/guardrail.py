@@ -38,7 +38,6 @@ Config (litellm config.yaml):
           redact_output: true           # also mask PII in model responses
           audit_path: /var/log/cloakwall/audit.log
           audit_hmac_key_env: CLOAKWALL_AUDIT_KEY
-          strict_cards: true
           fail_closed: true
 
 Everything runs in-process. No sidecar, no external endpoint, no model
@@ -52,7 +51,7 @@ import os
 from typing import Any, AsyncGenerator, Optional, Union
 
 from .audit import AuditLog, SIEMExporter
-from .redact import Redaction, Redactor, StreamRedactor
+from .redact import Redaction, Redactor, StreamRedactor, validation_counts
 
 try:
     from litellm.integrations.custom_guardrail import CustomGuardrail
@@ -135,7 +134,7 @@ class Cloakwall(CustomGuardrail):
         present = [f for f in REQUEST_FIELDS if data.get(f) is not None]
         if not present:
             self._record("cloakwall.request", model=data.get("model"), total=0,
-                         entities={})
+                         entities={}, validation={})
             return data
 
         try:
@@ -154,14 +153,17 @@ class Cloakwall(CustomGuardrail):
 
         hits = {r.entity for r in redactions}
         self._record("cloakwall.request", model=data.get("model"),
-                     entities=_counts(redactions), total=len(redactions))
+                     entities=_counts(redactions), total=len(redactions),
+                     validation=validation_counts(redactions))
         blocked = hits & self.block_on
         if blocked:
             self.blocked += 1
             self._record("cloakwall.blocked",
                          model=data.get("model"),
                          key_alias=getattr(user_api_key_dict, "key_alias", None),
-                         entities=_counts(redactions), blocked_on=sorted(blocked))
+                         entities=_counts(redactions),
+                         validation=validation_counts(redactions),
+                         blocked_on=sorted(blocked))
             raise ValueError(
                 "Cloakwall blocked this request: "
                 f"{', '.join(sorted(blocked))} present in prompt or tool-call arguments")
@@ -177,6 +179,7 @@ class Cloakwall(CustomGuardrail):
                 team_id=getattr(user_api_key_dict, "team_id", None),
                 entities=_counts(redactions),
                 total=len(redactions),
+                validation=validation_counts(redactions),
                 mode=self.redactor.mode,
             )
         return data
@@ -322,6 +325,7 @@ class Cloakwall(CustomGuardrail):
             team_id=getattr(user_api_key_dict, "team_id", None),
             entities=_counts(redactions),
             total=len(redactions),
+            validation=validation_counts(redactions),
             mode=self.redactor.mode,
             stream=stream,
         )

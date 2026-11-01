@@ -44,7 +44,7 @@ from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
 from .audit import AuditLog, SIEMExporter
-from .redact import Redaction, Redactor, StreamRedactor
+from .redact import Redaction, Redactor, StreamRedactor, validation_counts
 
 # Request fields that carry text, across every endpoint the proxy forwards.
 REQUEST_FIELDS = ("messages", "system", "prompt", "input")
@@ -518,13 +518,16 @@ class _Handler(BaseHTTPRequestHandler):
 
         model = data.get("model")
         if not self._record("cloakwall.request", method="POST", model=model, path=self.path,
-                            entities=_counts(redactions), total=len(redactions)):
+                            entities=_counts(redactions), total=len(redactions),
+                            validation=validation_counts(redactions)):
             return
         blocked = {r.entity for r in redactions} & p.block_on
         if blocked:
             p.count("requests_blocked")
             if not self._record("cloakwall.blocked", model=model, path=self.path,
-                                entities=_counts(redactions), blocked_on=sorted(blocked)):
+                                entities=_counts(redactions),
+                                validation=validation_counts(redactions),
+                                blocked_on=sorted(blocked)):
                 return
             self._error(400, "Cloakwall blocked this request: "
                              f"{', '.join(sorted(blocked))} present", "cloakwall_blocked")
@@ -533,6 +536,7 @@ class _Handler(BaseHTTPRequestHandler):
             p.count("requests_with_redactions")
             if not self._record("cloakwall.redacted", model=model, path=self.path,
                                 entities=_counts(redactions), total=len(redactions),
+                                validation=validation_counts(redactions),
                                 mode="restore" if p.restore else p.redactor.mode):
                 return
 
@@ -647,6 +651,7 @@ class _Handler(BaseHTTPRequestHandler):
             fields = {
                 "model": model, "stream": stream,
                 "entities": _counts(out.redactions), "total": len(out.redactions),
+                "validation": validation_counts(out.redactions),
                 "mode": p.redactor.mode,
             }
             if stream:

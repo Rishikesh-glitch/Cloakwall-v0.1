@@ -40,7 +40,6 @@ guardrails:
       # Optional: load a long random key from your secrets manager.
       # The key must remain outside the audit log directory.
       # audit_hmac_key_env: CLOAKWALL_AUDIT_KEY
-      # strict_cards: true        # redact card-shaped candidates even if Luhn fails
       audit_path: /var/log/cloakwall/audit.log
       fail_closed: true           # governs redaction errors, not audit write errors
       # redact_output: true       # also mask PII in model responses,
