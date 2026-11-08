@@ -50,7 +50,7 @@ def _serve(args: argparse.Namespace) -> int:
             strict_cards=args.strict_cards,
         )
     except (ValueError, OSError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        print(f"error: proxy setup failed ({exc.__class__.__name__})", file=sys.stderr)
         return 2
 
     output = ("restore (real values put back in replies)" if args.restore
@@ -106,7 +106,8 @@ def _verify(args: argparse.Namespace) -> int:
             with open(args.anchor_file) as fh:
                 anchor = json.load(fh)
         except (OSError, ValueError) as exc:
-            print(f"error: cannot read anchor file: {exc}", file=sys.stderr)
+            print(f"error: cannot read anchor file ({exc.__class__.__name__})",
+                  file=sys.stderr)
             return 2
     ok, msg = AuditLog(args.path, hmac_key=key.encode() if key is not None else None).verify(
         anchor=anchor)

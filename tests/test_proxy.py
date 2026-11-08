@@ -7,6 +7,8 @@ every request it receives, puts the proxy in front of it, and checks what
 each side saw.
 """
 
+import contextlib
+import io
 import json
 import os
 import sys
@@ -209,6 +211,24 @@ status, _, body = call(p, "/v1/models")
 check("GET /v1/models passes through", (status, json.loads(body)["data"][0]["id"]), (200, "fake-model"))
 check("upstream path mapping", Upstream.seen[-1][0], "/v1/models")
 
+api_key_secret = "api-key-query-secret-123"
+token_secret = "token-query-secret-456"
+query = f"api_key={api_key_secret}&access_token={token_secret}"
+call(p, f"/v1/models?{query}")
+check("GET query is forwarded upstream", Upstream.seen[-1][0],
+    f"/v1/models?{query}")
+call(p, f"/v1/chat/completions?{query}", {
+    "model": "echo", "messages": [{"role": "user", "content": "clean"}]})
+check("POST query is forwarded upstream", Upstream.seen[-1][0],
+    f"/v1/chat/completions?{query}")
+audit_text = read_log("audit.log")
+audit_events = [json.loads(line) for line in audit_text.splitlines()]
+audit_paths = [event["path"] for event in audit_events if "path" in event]
+check("API key is absent from audit log", api_key_secret in audit_text, False)
+check("access token is absent from audit log", token_secret in audit_text, False)
+check("GET audit path omits query", "/v1/models" in audit_paths, True)
+check("POST audit path omits query", "/v1/chat/completions" in audit_paths, True)
+
 status, _, body = call(p, "/cloakwall/health")
 check("health endpoint", (status, json.loads(body)["status"]), (200, "ok"))
 p.shutdown()
@@ -350,6 +370,22 @@ pieces = [sr.feed(c)[0] for c in ("mail <EMA", "IL:7f3a", "91c2> now ", "a < b")
 check("split token restored", "".join(pieces) + sr.flush()[0], "mail a@b.com now a < b")
 
 section("Configuration")
+private_detail = "sensitive-upstream-credential"
+stderr = io.StringIO()
+with contextlib.redirect_stderr(stderr):
+    setup_status = cli_main(["serve", "--upstream",
+                             f"ftp://user:{private_detail}@example.test/path"])
+check("proxy setup error omits upstream URL", private_detail in stderr.getvalue(), False)
+check("proxy setup error returns failure", setup_status, 2)
+
+private_path = os.path.join(TMP, f"missing-{private_detail}.json")
+stderr = io.StringIO()
+with contextlib.redirect_stderr(stderr):
+    verify_status = cli_main(["verify", os.path.join(TMP, "unused.log"),
+                              "--anchor-file", private_path])
+check("anchor file error omits local path", private_detail in stderr.getvalue(), False)
+check("anchor file error returns failure", verify_status, 2)
+
 try:
     CloakwallProxy(upstream=UPSTREAM, port=0, redact_output=True, restore=True,
                    audit_path=os.path.join(TMP, "x.log"))

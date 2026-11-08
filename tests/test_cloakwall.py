@@ -263,6 +263,16 @@ with tempfile.TemporaryDirectory() as d:
     check("reports all anchored entries missing", "log holds 0" in msg, True)
 
 with tempfile.TemporaryDirectory() as d:
+    log = AuditLog(os.path.join(d, "private-path.log"))
+    private_path = "sensitive-anchor-path"
+    def fail_read_anchor():
+        raise OSError(private_path)
+    log._read_anchor = fail_read_anchor
+    ok, msg = log.verify()
+    check("anchor error omits exception details", private_path in msg, False)
+    check("anchor error retains exception type", msg, "cannot read anchor (OSError)")
+
+with tempfile.TemporaryDirectory() as d:
     log = AuditLog(os.path.join(d, "s.log"))
     for i in range(5):
         log.append("e", n=i)
@@ -443,6 +453,21 @@ async def guardrail_tests():
         except OSError:
             stopped = True
         check("audit write failure stops the guardrail pre-call", stopped, True)
+
+    with tempfile.TemporaryDirectory() as d:
+        g = Cloakwall(audit_path=os.path.join(d, "exception.log"), fail_closed=False)
+        private_detail = "sensitive-request-exception-detail"
+        def fail_redact_messages(_messages):
+            raise RuntimeError(private_detail)
+        g.redactor.redact_messages = fail_redact_messages
+        await g.async_pre_call_hook(
+            Key(), None, {"model": "m", "messages": [
+                {"role": "user", "content": "clean text"}]}, "acompletion")
+        raw = open(g.audit.path).read()
+        error_event = next(json.loads(line) for line in raw.splitlines()
+                           if json.loads(line).get("event") == "cloakwall.error")
+        check("guardrail exception details omitted from audit", private_detail in raw, False)
+        check("guardrail exception type retained", error_event["error"], "RuntimeError")
 
 
 asyncio.run(guardrail_tests())
