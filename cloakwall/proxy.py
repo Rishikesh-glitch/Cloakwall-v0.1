@@ -305,7 +305,7 @@ class CloakwallProxy:
                              "PII from the caller, restore gives it back. Choose one.")
         parts = urlsplit(upstream)
         if parts.scheme not in ("http", "https") or not parts.netloc:
-            raise ValueError(f"upstream must be an http(s) URL, got {upstream!r}")
+            raise ValueError("upstream must be an http(s) URL")
         self.upstream = upstream.rstrip("/")
         self.upstream_key = upstream_key
         self.redactor = Redactor(mode=redaction_mode,
@@ -391,6 +391,9 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:
         pass    # request lines can carry query strings; the audit log is the record
 
+    def _audit_path(self) -> str:
+        return urlsplit(self.path)._replace(query="").geturl()
+
     # -------------------------------------------------------------- replies
     def _send_json(self, status: int, obj: Any) -> None:
         body = json.dumps(obj).encode()
@@ -458,7 +461,7 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path == "/cloakwall/health":
             self._send_json(200, {"status": "ok", **self.proxy.stats()})
             return
-        if not self._record("cloakwall.request", method="GET", path=self.path,
+        if not self._record("cloakwall.request", method="GET", path=self._audit_path(),
                             entities={}, total=0):
             return
         try:
@@ -517,14 +520,15 @@ class _Handler(BaseHTTPRequestHandler):
             redactions = []
 
         model = data.get("model")
-        if not self._record("cloakwall.request", method="POST", model=model, path=self.path,
+        if not self._record("cloakwall.request", method="POST", model=model,
+                    path=self._audit_path(),
                             entities=_counts(redactions), total=len(redactions),
                             validation=validation_counts(redactions)):
             return
         blocked = {r.entity for r in redactions} & p.block_on
         if blocked:
             p.count("requests_blocked")
-            if not self._record("cloakwall.blocked", model=model, path=self.path,
+            if not self._record("cloakwall.blocked", model=model, path=self._audit_path(),
                                 entities=_counts(redactions),
                                 validation=validation_counts(redactions),
                                 blocked_on=sorted(blocked)):
@@ -534,7 +538,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if redactions:
             p.count("requests_with_redactions")
-            if not self._record("cloakwall.redacted", model=model, path=self.path,
+            if not self._record("cloakwall.redacted", model=model, path=self._audit_path(),
                                 entities=_counts(redactions), total=len(redactions),
                                 validation=validation_counts(redactions),
                                 mode="restore" if p.restore else p.redactor.mode):

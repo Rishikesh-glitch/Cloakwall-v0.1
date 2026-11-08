@@ -114,6 +114,17 @@ streamed = "".join(sr.feed(c).text for c in
                     for i in range(0, len(PEM) + 100, 7)]) + sr.flush().text
 check("private key streamed in 7-char chunks never leaks",
       ("MIIEpA" in streamed, "AbCdEf" in streamed, "<PRIVATE_KEY>" in streamed), (False, False, True))
+pem_text = "Key:\n" + PEM + "\nDone"
+pem_expected = r.redact(pem_text).text
+pem_stream = StreamRedactor(r, holdback=16)
+pem_emitted = ""
+pem_online_safe = True
+for char in pem_text:
+    pem_emitted += pem_stream.feed(char).text
+    pem_online_safe = pem_online_safe and pem_expected.startswith(pem_emitted)
+pem_emitted += pem_stream.flush().text
+check("one-character PEM chunks never emit an unsafe prefix",
+      (pem_emitted, pem_online_safe), (pem_expected, True))
 
 for text in ["use sk-learn-compatible-estimator here", "pip install scikit-learn",
              "visit https://example.com/path", "the hf_hub module", "xoxo hugs",
@@ -250,6 +261,16 @@ with tempfile.TemporaryDirectory() as d:
     ok, msg = log.verify(anchor=anchor)
     check("external anchor detects a missing log", ok, False)
     check("reports all anchored entries missing", "log holds 0" in msg, True)
+
+with tempfile.TemporaryDirectory() as d:
+    log = AuditLog(os.path.join(d, "private-path.log"))
+    private_path = "sensitive-anchor-path"
+    def fail_read_anchor():
+        raise OSError(private_path)
+    log._read_anchor = fail_read_anchor
+    ok, msg = log.verify()
+    check("anchor error omits exception details", private_path in msg, False)
+    check("anchor error retains exception type", msg, "cannot read anchor (OSError)")
 
 with tempfile.TemporaryDirectory() as d:
     log = AuditLog(os.path.join(d, "s.log"))
@@ -432,6 +453,21 @@ async def guardrail_tests():
         except OSError:
             stopped = True
         check("audit write failure stops the guardrail pre-call", stopped, True)
+
+    with tempfile.TemporaryDirectory() as d:
+        g = Cloakwall(audit_path=os.path.join(d, "exception.log"), fail_closed=False)
+        private_detail = "sensitive-request-exception-detail"
+        def fail_redact_messages(_messages):
+            raise RuntimeError(private_detail)
+        g.redactor.redact_messages = fail_redact_messages
+        await g.async_pre_call_hook(
+            Key(), None, {"model": "m", "messages": [
+                {"role": "user", "content": "clean text"}]}, "acompletion")
+        raw = open(g.audit.path).read()
+        error_event = next(json.loads(line) for line in raw.splitlines()
+                           if json.loads(line).get("event") == "cloakwall.error")
+        check("guardrail exception details omitted from audit", private_detail in raw, False)
+        check("guardrail exception type retained", error_event["error"], "RuntimeError")
 
 
 asyncio.run(guardrail_tests())

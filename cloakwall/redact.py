@@ -370,6 +370,8 @@ class StreamBufferOverflowError(RuntimeError):
 
 
 _STREAM_CANDIDATE_MARKERS = ("@", *_KEY_PREFIXES)
+_PRIVATE_KEY_BEGIN = re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----")
+_PRIVATE_KEY_END = re.compile(r"-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----")
 
 
 class StreamRedactor:
@@ -435,7 +437,7 @@ class StreamRedactor:
             before = p[c - 2] if c >= 2 else ""
             if (before.isdigit() or before in "+(") and (p[c].isdigit() or p[c] in "+("):
                 continue
-            if not inside(c):
+            if not inside(c) and not self._has_unmatched_candidate_marker(p, c, spans):
                 return c
         if len(p) > self.max_pending:
             if inside(limit) or self._has_unmatched_candidate_marker(p, limit, spans):
@@ -451,6 +453,9 @@ class StreamRedactor:
     @staticmethod
     def _has_unmatched_candidate_marker(p: str, limit: int,
                                        spans: list[tuple[int, int]]) -> bool:
+        for begin in _PRIVATE_KEY_BEGIN.finditer(p, 0, limit):
+            if not _PRIVATE_KEY_END.search(p, begin.end()):
+                return True
         for marker in _STREAM_CANDIDATE_MARKERS:
             start = p.find(marker, 0, limit)
             while start >= 0:

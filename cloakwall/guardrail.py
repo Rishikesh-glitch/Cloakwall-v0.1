@@ -146,7 +146,8 @@ class Cloakwall(CustomGuardrail):
                     cleaned[f], r = self.redactor.redact_value(data[f])
                 redactions.extend(r)
         except Exception as exc:
-            self._record("cloakwall.error", stage="pre_call", error=str(exc))
+            self._record("cloakwall.error", stage="pre_call",
+                         error=exc.__class__.__name__)
             if self.fail_closed:
                 raise
             return data
@@ -193,7 +194,8 @@ class Cloakwall(CustomGuardrail):
             try:
                 redactions = self._redact_response(response)
             except Exception as exc:
-                self._record("cloakwall.error", stage="post_call", error=str(exc))
+                self._record("cloakwall.error", stage="post_call",
+                             error=exc.__class__.__name__)
                 if self.fail_closed:
                     raise
                 redactions = []
@@ -270,7 +272,8 @@ class Cloakwall(CustomGuardrail):
             for extra in flush():
                 yield extra
         except Exception as exc:
-            self._record("cloakwall.error", stage="stream", error=str(exc))
+            self._record("cloakwall.error", stage="stream",
+                         error=exc.__class__.__name__)
             raise
         finally:
             self._record_output(request_data, user_api_key_dict, redactions, stream=True)

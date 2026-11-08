@@ -189,7 +189,7 @@ class AuditLog:
         try:
             a = anchor if anchor is not None else self._read_anchor()
         except (OSError, ValueError) as exc:
-            return False, f"cannot read anchor: {exc}"
+            return False, f"cannot read anchor ({exc.__class__.__name__})"
         if a is not None:
             if not isinstance(a, dict):
                 return False, "invalid anchor: expected a JSON object"
